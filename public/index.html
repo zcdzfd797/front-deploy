@@ -1,0 +1,283 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0c1018">
+  <title>前端部署工具</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+
+  <div class="app-shell">
+    <header class="header" aria-label="页面头部">
+      <div class="header-copy">
+        <h1>前端部署工具</h1>
+        <p class="subtitle">录入项目、自动打包、远程部署，一站式完成发布流程。</p>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-secondary" type="button" id="btnRefreshProjects">刷新列表</button>
+        <button class="btn btn-primary" type="button" id="btnAddProject">+ 添加项目</button>
+      </div>
+    </header>
+
+    <section class="summary" aria-label="项目概览">
+      <article class="summary-item">
+        <span class="summary-label">项目总数</span>
+        <strong class="summary-value" id="summaryTotal">0</strong>
+      </article>
+      <article class="summary-item">
+        <span class="summary-label">可部署项目</span>
+        <strong class="summary-value" id="summaryReady">0</strong>
+      </article>
+      <article class="summary-item">
+        <span class="summary-label">已部署项目</span>
+        <strong class="summary-value" id="summaryDeployed">0</strong>
+      </article>
+    </section>
+
+    <main class="layout" id="mainContent">
+      <section class="panel left-panel" aria-label="项目列表">
+        <div class="panel-header">
+          <h2>项目列表</h2>
+          <p id="groupHint">可在列表中直接执行打包和部署操作。</p>
+        </div>
+        <div class="group-info" id="groupInfo" hidden>
+          <div class="group-info-header">
+            <h3 id="groupInfoTitle">分组信息</h3>
+            <span id="groupInfoCount">0 项</span>
+          </div>
+          <div class="group-meta-editor" id="groupMetaEditor" hidden>
+            <div class="group-meta-row">
+              <label for="groupEditName">分组名称</label>
+              <input type="text" id="groupEditName" placeholder="分组名称…" maxlength="30" autocomplete="off">
+            </div>
+            <div class="group-meta-row">
+              <label for="groupEditAccessUrl">分组访问地址</label>
+              <div class="group-meta-url-row">
+                <input type="url" id="groupEditAccessUrl" placeholder="例如：https://group.example.com" autocomplete="off" spellcheck="false" inputmode="url" translate="no">
+                <a class="btn btn-secondary btn-sm group-open-link disabled" id="groupOpenLink" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true">打开网站</a>
+              </div>
+            </div>
+            <div class="group-meta-actions">
+              <button class="btn btn-primary btn-sm" type="button" id="btnSaveGroupMeta">保存分组信息</button>
+            </div>
+          </div>
+          <div class="group-info-list" id="groupInfoList"></div>
+        </div>
+        <div class="left-body">
+          <aside class="group-sidebar" aria-label="项目分组切换">
+            <div class="group-sidebar-title">分组</div>
+            <div class="group-create">
+              <input type="text" id="inputNewGroupName" placeholder="新建分组名称…" autocomplete="off" maxlength="30">
+              <button class="btn btn-secondary btn-sm" type="button" id="btnCreateGroup">新建</button>
+            </div>
+            <div class="group-list" id="groupList"></div>
+          </aside>
+          <div class="project-content">
+            <div class="empty-state" id="emptyState">
+              <p>暂无项目，点击右上角“添加项目”开始。</p>
+            </div>
+            <div class="project-list" id="projectList"></div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel right-panel" id="rightPanel" aria-label="终端日志">
+        <div class="terminal-header">
+          <h2 class="terminal-title" id="terminalTitle">操作终端</h2>
+          <button class="btn btn-xs btn-secondary" type="button" id="btnClearTerminal">清空</button>
+        </div>
+        <div class="terminal" id="terminal" role="log" aria-live="polite" aria-relevant="additions text">
+          <div class="terminal-line hint">等待操作…</div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+  <datalist id="recentDirList"></datalist>
+  <datalist id="groupNameList"></datalist>
+
+  <div class="modal-overlay" id="addModal" aria-hidden="true" role="presentation">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addModalTitle">
+      <div class="modal-header">
+        <h2 id="addModalTitle">添加项目</h2>
+        <button class="btn-close" type="button" data-close="addModal" aria-label="关闭添加项目弹窗">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="inputDirPath">工作副本路径</label>
+          <div class="input-row">
+            <input type="text" id="inputDirPath" name="dirPath" placeholder="可粘贴路径，或点击“浏览”…" autocomplete="off" spellcheck="false" list="recentDirList" translate="no">
+            <button class="btn btn-secondary" type="button" id="btnBrowseFolder">浏览…</button>
+            <button class="btn btn-secondary btn-open-path" type="button" id="btnOpenAddDir">打开</button>
+          </div>
+          <div class="path-quick-row">
+            <select id="addRecentDir" aria-label="添加项目最近路径">
+              <option value="">最近使用路径…</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" type="button" id="btnApplyAddRecent">使用</button>
+          </div>
+        </div>
+
+        <div class="form-group git-info" id="gitInfo" hidden>
+          <label>Git 信息</label>
+          <div class="info-grid">
+            <div class="info-item"><span class="label">项目名称：</span><span id="infoProjectName">-</span></div>
+            <div class="info-item"><span class="label">当前分支：</span><span id="infoBranch">-</span></div>
+            <div class="info-item"><span class="label">最新提交：</span><span id="infoCommit">-</span></div>
+            <div class="info-item"><span class="label">提交信息：</span><span id="infoCommitMsg">-</span></div>
+            <div class="info-item"><span class="label">提交时间：</span><span id="infoCommitTime">-</span></div>
+          </div>
+          <div class="form-group top-gap">
+            <label for="infoRecentLogs">最近 10 条提交</label>
+            <pre class="log-box" id="infoRecentLogs"></pre>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="inputRemark">项目备注</label>
+          <input type="text" id="inputRemark" name="remark" placeholder="可选备注，例如：生产环境…" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="inputAccessUrl">项目访问地址</label>
+          <input type="url" id="inputAccessUrl" name="accessUrl" placeholder="例如：https://demo.example.com" autocomplete="off" spellcheck="false" inputmode="url" translate="no">
+        </div>
+        <div class="form-group">
+          <label for="inputGroupName">所属分组</label>
+          <input type="text" id="inputGroupName" name="groupName" placeholder="可选，不填将归入“未知组”…" autocomplete="off" list="groupNameList">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" type="button" data-close="addModal">取消</button>
+        <button class="btn btn-primary" type="button" id="btnSaveProject">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="editModal" aria-hidden="true" role="presentation">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
+      <div class="modal-header">
+        <h2 id="editModalTitle">编辑项目</h2>
+        <button class="btn-close" type="button" data-close="editModal" aria-label="关闭编辑项目弹窗">×</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="section-title">项目信息</div>
+        <div class="form-group">
+          <label for="editProjectName">项目名称</label>
+          <input type="text" id="editProjectName" name="projectName" placeholder="请输入项目名称…" autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="editDirPath">工作副本路径</label>
+          <div class="input-row">
+            <input type="text" id="editDirPath" name="editDirPath" placeholder="可直接输入或粘贴路径…" autocomplete="off" spellcheck="false" list="recentDirList" translate="no">
+            <button class="btn btn-secondary btn-browse-edit" type="button">浏览…</button>
+            <button class="btn btn-secondary btn-open-path" type="button" id="btnOpenEditDir">打开</button>
+          </div>
+          <div class="path-quick-row">
+            <select id="editRecentDir" aria-label="编辑项目最近路径">
+              <option value="">最近使用路径…</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" type="button" id="btnApplyEditRecent">使用</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="editBranch">分支</label>
+          <input type="text" id="editBranch" name="branch" placeholder="例如：main" autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="editCommitHash">最新提交 Hash</label>
+          <input type="text" id="editCommitHash" name="commitHash" placeholder="例如：3a4f4c1a" autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="editCommitMsg">提交信息</label>
+          <input type="text" id="editCommitMsg" name="commitMsg" placeholder="提交说明…" autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="editRemark">项目备注</label>
+          <input type="text" id="editRemark" name="editRemark" placeholder="例如：ACC 环境" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="editAccessUrl">项目访问地址</label>
+          <input type="url" id="editAccessUrl" name="editAccessUrl" placeholder="例如：https://demo.example.com" autocomplete="off" spellcheck="false" inputmode="url" translate="no">
+        </div>
+        <div class="form-group">
+          <label for="editGroupName">所属分组</label>
+          <input type="text" id="editGroupName" name="editGroupName" placeholder="可选，不填将归入“未知组”…" autocomplete="off" list="groupNameList">
+        </div>
+
+        <div class="section-title">打包配置</div>
+        <div class="form-group">
+          <label for="editBuildCmd">构建命令</label>
+          <input type="text" id="editBuildCmd" name="buildCmd" placeholder="例如：npm run build" autocomplete="off">
+        </div>
+
+        <div class="section-title">部署信息</div>
+        <div class="form-group">
+          <label for="editInputJsonFile">导入 JSON 配置</label>
+          <div class="input-row">
+            <input type="file" id="editInputJsonFile" name="sshConfig" accept=".json" hidden>
+            <button class="btn btn-secondary btn-import-json-edit" type="button">导入 JSON</button>
+            <span class="hint edit-json-hint"></span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="editHost">服务器地址</label>
+          <input type="text" id="editHost" name="host" placeholder="例如：192.168.1.100" autocomplete="off" spellcheck="false">
+        </div>
+
+        <div class="form-group">
+          <label for="editPort">SSH 端口</label>
+          <input type="number" id="editPort" name="port" value="22" inputmode="numeric" autocomplete="off">
+        </div>
+
+        <div class="form-group">
+          <label for="editUsername">用户名</label>
+          <input type="text" id="editUsername" name="username" placeholder="例如：root" autocomplete="username" spellcheck="false">
+        </div>
+
+        <div class="form-group">
+          <label>认证方式</label>
+          <div class="tab-group edit-auth-tabs" role="tablist" aria-label="认证方式选择">
+            <button class="tab-btn active" type="button" data-auth="password" role="tab" aria-selected="true">密码</button>
+            <button class="tab-btn" type="button" data-auth="key" role="tab" aria-selected="false">私钥</button>
+          </div>
+        </div>
+
+        <div class="form-group edit-auth-password">
+          <label for="editPassword">密码</label>
+          <input type="password" id="editPassword" name="password" placeholder="请输入服务器密码…" autocomplete="current-password" spellcheck="false">
+        </div>
+
+        <div class="form-group edit-auth-key" hidden>
+          <label for="editPrivateKey">私钥内容</label>
+          <textarea id="editPrivateKey" name="privateKey" rows="5" placeholder="粘贴 SSH 私钥内容…" spellcheck="false" autocomplete="off"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="editDeployPath">部署路径</label>
+          <input type="text" id="editDeployPath" name="deployPath" placeholder="例如：/var/www/html/my-app" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" type="button" data-close="editModal">取消</button>
+        <button class="btn btn-secondary" type="button" id="btnRefreshGit">刷新 Git</button>
+        <button class="btn btn-secondary" type="button" id="btnTestConn">测试连接</button>
+        <button class="btn btn-primary" type="button" id="btnSaveEdit">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
