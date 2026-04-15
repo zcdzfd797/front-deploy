@@ -1,7 +1,7 @@
 ﻿const express = require('express');
 const path = require('path');
 const fs = require('fs-extra');
-const { execSync, exec, spawn } = require('child_process');
+const { execSync, exec, spawn, spawnSync } = require('child_process');
 const archiver = require('archiver');
 const { Client } = require('ssh2');
 const { v4: uuidv4 } = require('uuid');
@@ -70,6 +70,59 @@ function checkProjectBranch(project) {
       message: `分支校验失败: ${err.message}`
     };
   }
+}
+
+function runGitCommand(dirPath, args) {
+  const result = spawnSync('git', args, {
+    cwd: dirPath,
+    encoding: 'utf-8',
+    shell: false
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const message = String(result.stderr || result.stdout || '').trim();
+    throw new Error(message || `git ${args.join(' ')} 执行失败`);
+  }
+  return String(result.stdout || '').trim();
+}
+
+function getGitSyncInfo(project) {
+  const dirPath = project?.dirPath;
+  if (!dirPath || !fs.existsSync(dirPath)) {
+    throw new Error('项目路径不存在');
+  }
+  if (!fs.existsSync(path.join(dirPath, '.git'))) {
+    throw new Error('项目路径不是 Git 仓库');
+  }
+
+  const localBranch = runGitCommand(dirPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const localHash = runGitCommand(dirPath, ['rev-parse', 'HEAD']);
+  const localCommitMsg = runGitCommand(dirPath, ['log', '-1', '--pretty=%B']);
+  const localCommitTime = runGitCommand(dirPath, ['log', '-1', '--pretty=%ci']);
+
+  const remoteLine = runGitCommand(dirPath, ['ls-remote', '--heads', 'origin', localBranch]);
+  const [remoteHashRaw = '', remoteRefRaw = ''] = remoteLine.split(/\s+/);
+  if (!remoteHashRaw) {
+    throw new Error(`未找到远程分支 origin/${localBranch}`);
+  }
+
+  const remoteHash = remoteHashRaw.trim();
+  const remoteRef = remoteRefRaw.trim() || `refs/heads/${localBranch}`;
+  return {
+    localBranch,
+    localHash,
+    localHashShort: localHash.slice(0, 8),
+    localCommitMsg: localCommitMsg.trim(),
+    localCommitTime: localCommitTime.trim(),
+    remoteBranch: localBranch,
+    remoteRef,
+    remoteHash,
+    remoteHashShort: remoteHash.slice(0, 8),
+    same: localHash === remoteHash
+  };
 }
 
 app.post('/api/parse-git', (req, res) => {
@@ -271,6 +324,19 @@ app.get('/api/branch-check/:id', (req, res) => {
   if (!project) return res.status(404).json({ error: '项目不存在' });
   const result = checkProjectBranch(project);
   res.json(result);
+});
+
+app.get('/api/git-sync-check/:id', (req, res) => {
+  try {
+    const projects = loadProjects();
+    const project = projects.find(p => p.id === req.params.id);
+    if (!project) return res.status(404).json({ error: '项目不存在' });
+
+    const info = getGitSyncInfo(project);
+    res.json(info);
+  } catch (err) {
+    res.status(500).json({ error: `Git 同步校验失败: ${err.message}` });
+  }
 });
 
 app.get('/api/pack/:id', (req, res) => {
