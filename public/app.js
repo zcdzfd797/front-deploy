@@ -560,11 +560,13 @@ function setOperationStatus(type, label, detail = "") {
 function renderTodayInfo() {
   const todayInfo = byId("todayInfo");
   if (!todayInfo) return;
-  todayInfo.textContent = new Intl.DateTimeFormat("zh-CN", {
+  const dateText = new Intl.DateTimeFormat("zh-CN", {
     month: "long",
     day: "numeric",
     weekday: "long"
   }).format(new Date());
+  const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+  todayInfo.textContent = `${dateText} · 端口 ${port}`;
 }
 
 function normalizeErrorMessage(message) {

@@ -8,11 +8,17 @@ const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 
 const app = express();
-const PORT = 3000;
+const HOST = process.env.HOST || '127.0.0.1';
+const PORT = Number(process.env.PORT) || 3000;
+const APP_INSTANCE_ID = process.env.APP_INSTANCE_ID || "";
 const DATA_FILE = path.join(__dirname, 'projects.json');
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/api/_health', (req, res) => {
+  res.json({ ok: true, instanceId: APP_INSTANCE_ID });
+});
 
 const upload = multer({ dest: path.join(__dirname, 'temp') });
 
@@ -616,11 +622,14 @@ app.post('/api/open-zip-folder', (req, res) => {
   }
 });
 
-if (process.platform === 'win32') {
-  try { execSync(`for /f "tokens=5" %a in ('netstat -ano ^| findstr :${PORT} ^| findstr LISTENING') do taskkill /PID %a /F`, { stdio: 'ignore', shell: 'cmd.exe' }); } catch {}
-}
+const server = app.listen(PORT, HOST, () => {
+  const address = server.address();
+  const actualPort = typeof address === 'object' && address ? address.port : PORT;
+  console.log(`服务已启动: http://${HOST}:${actualPort}`);
+});
 
-app.listen(PORT, () => {
-  console.log(`服务已启动: http://localhost:${PORT}`);
+server.on('error', (err) => {
+  console.error('服务启动失败:', err.message);
+  process.exit(1);
 });
 
