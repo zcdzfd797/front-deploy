@@ -81,7 +81,9 @@ npm run tauri:build
 
 说明：
 
-- Tauri 启动时会自动拉起本地 `server.js`（端口 `3000`），并在退出时回收该子进程
+- 开发模式通过 `beforeDevCommand` 先执行 `npm run dev` 启动本地服务
+- 桌面壳启动时会检测 `3000` 端口；若服务未运行则自动拉起 `server.js`
+- 若由桌面壳拉起服务，应用退出时会自动回收该子进程
 - 该版本默认调用系统 `node` 启动服务，需本机已安装 Node.js
 - 本机需安装 Rust 工具链后才能执行 Tauri 构建
 

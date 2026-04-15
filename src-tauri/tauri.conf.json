@@ -4,12 +4,14 @@
   "version": "1.0.0",
   "identifier": "com.frontdeploy.manager",
   "build": {
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:3000",
     "frontendDist": "../public"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "前端部署管理器",
         "url": "http://127.0.0.1:3000",
         "width": 1600,
