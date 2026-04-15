@@ -27,13 +27,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "resources": [
       "../server.js",
       "../package.json",
       "../package-lock.json",
-      "../public/**",
-      "../node_modules/**"
+      "../public",
+      "../node_modules"
     ]
   }
 }
