@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node --openssl-legacy-provider server.js",
-    "dev": "node --openssl-legacy-provider server.js"
+    "dev": "node --openssl-legacy-provider server.js",
+    "tauri:dev": "npx tauri dev",
+    "tauri:build": "npx tauri build"
   },
   "dependencies": {
     "express": "^4.18.2",

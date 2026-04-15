@@ -65,6 +65,26 @@ npm run dev
 
 默认地址：`http://localhost:3000`
 
+## Tauri 桌面版（Windows/macOS）
+
+当前仓库已提供一版 Tauri 桌面壳（目录：`src-tauri`），运行方式：
+
+```bash
+npm run tauri:dev
+```
+
+构建安装包：
+
+```bash
+npm run tauri:build
+```
+
+说明：
+
+- Tauri 启动时会自动拉起本地 `server.js`（端口 `3000`），并在退出时回收该子进程
+- 该版本默认调用系统 `node` 启动服务，需本机已安装 Node.js
+- 本机需安装 Rust 工具链后才能执行 Tauri 构建
+
 ## 主要接口
 
 - `POST /api/parse-git`：解析本地 Git 信息
