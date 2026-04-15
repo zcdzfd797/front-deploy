@@ -1,0 +1,52 @@
+name: Build Windows Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - tauri
+    paths:
+      - ".github/workflows/tauri-windows.yml"
+      - "src-tauri/**"
+      - "public/**"
+      - "server.js"
+      - "package.json"
+      - "package-lock.json"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Windows Bundle
+        run: npm run tauri:build:win
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/front-deploy-tauri.exe

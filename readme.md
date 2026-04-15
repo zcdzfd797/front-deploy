@@ -1,6 +1,18 @@
 # 前端部署管理器
 
+[![Windows 云端构建](https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-windows.yml/badge.svg?branch=tauri)](https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-windows.yml)
+[![macOS 云端构建](https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-macos.yml/badge.svg?branch=tauri)](https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-macos.yml)
+
 一个本地运行的前端发布辅助工具，支持从 Git 项目读取信息、执行构建打包，并通过 SSH 上传到目标服务器完成部署。
+
+## 云端下载（仓库首页）
+
+- Windows 安装包下载入口：  
+  [https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-windows.yml](https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-windows.yml)
+- macOS 安装包下载入口：  
+  [https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-macos.yml](https://github.com/zcdzfd797/front-deploy/actions/workflows/tauri-macos.yml)
+- 下载说明：进入最新一次成功运行，在 `Artifacts` 中下载：  
+  `windows-bundle`（Windows）或 `macos-bundle`（macOS）
 
 ## 当前能力
 
