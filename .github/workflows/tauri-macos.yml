@@ -1,0 +1,52 @@
+name: Build macOS Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - tauri
+    paths:
+      - ".github/workflows/tauri-macos.yml"
+      - "src-tauri/**"
+      - "public/**"
+      - "server.js"
+      - "package.json"
+      - "package-lock.json"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build macOS Bundle
+        run: npm run tauri:build -- --bundles app,dmg
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundle
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app
