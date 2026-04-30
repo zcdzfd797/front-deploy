@@ -345,6 +345,109 @@ app.get('/api/git-sync-check/:id', (req, res) => {
   }
 });
 
+function buildSshConnConfig(deploy) {
+  const connConfig = { host: deploy.host, port: deploy.port || 22, username: deploy.username };
+  if (deploy.privateKey) connConfig.privateKey = deploy.privateKey;
+  else if (deploy.password) connConfig.password = deploy.password;
+  return connConfig;
+}
+
+function resolveProjectDeployFolderName(project) {
+  const packDirName = String(project?.packDirName || '').trim();
+  if (packDirName) return packDirName;
+
+  const zipName = String(project?.zipName || '').trim();
+  if (zipName) return path.basename(zipName, path.extname(zipName));
+
+  const zipPath = String(project?.zipPath || '').trim();
+  if (zipPath) return path.basename(zipPath, path.extname(zipPath));
+
+  return '';
+}
+
+function escapePosixExtendedRegex(value) {
+  return String(value || '').replace(/[.[\]{}()*+?^$|\\]/g, '\\$&');
+}
+
+function quoteShellArg(value) {
+  return `'${String(value || '').replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function buildBackupDirectoryFindCommand(rootPath, folderName) {
+  const safeRoot = quoteShellArg(rootPath);
+  const safeRegex = quoteShellArg(`./${escapePosixExtendedRegex(folderName)}_[0-9]{8}_[0-9]{6}`);
+  return `cd ${safeRoot} && find . -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex ${safeRegex} -print`;
+}
+
+function parseBackupDirectoryListOutput(stdout) {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^\.\//, ''))
+    .filter(Boolean)
+    .sort((a, b) => b.localeCompare(a, 'zh-Hans-CN'));
+}
+
+function buildBackupDirectoryNamePattern(folderName) {
+  return new RegExp(`^${escapePosixExtendedRegex(folderName)}_\\d{8}_\\d{6}$`);
+}
+
+function normalizeRequestedBackupDirectories(queryValue) {
+  const values = Array.isArray(queryValue) ? queryValue : [queryValue];
+  return Array.from(new Set(values
+    .map((item) => String(item || '').trim().replace(/^\.\//, ''))
+    .filter(Boolean)));
+}
+
+function buildDeleteBackupDirectoriesCommand(rootPath, directoryNames) {
+  const safeRoot = quoteShellArg(rootPath);
+  const targets = directoryNames.map((name) => quoteShellArg(`./${name}`)).join(' ');
+  return `cd ${safeRoot} && rm -rf -- ${targets}`;
+}
+
+function chunkItems(items, size) {
+  const result = [];
+  const chunkSize = Math.max(1, Number(size) || 1);
+  for (let index = 0; index < items.length; index += chunkSize) {
+    result.push(items.slice(index, index + chunkSize));
+  }
+  return result;
+}
+
+function execRemoteCommand(conn, command, onLine) {
+  return new Promise((resolve, reject) => {
+    conn.exec(command, (err, stream) => {
+      if (err) {
+        reject(new Error('远程命令执行失败: ' + err.message));
+        return;
+      }
+
+      let stdout = '';
+      let stderr = '';
+
+      stream.on('data', (data) => {
+        const text = data.toString();
+        stdout += text;
+        text.split(/\r?\n/).filter(Boolean).forEach((line) => onLine?.(line));
+      });
+
+      stream.stderr.on('data', (data) => {
+        const text = data.toString();
+        stderr += text;
+        text.split(/\r?\n/).filter(Boolean).forEach((line) => onLine?.(line));
+      });
+
+      stream.on('close', (code) => {
+        if (code !== 0) {
+          const message = String(stderr || stdout || '').trim();
+          reject(new Error(message || `命令执行失败(code ${code})`));
+          return;
+        }
+        resolve({ stdout, stderr });
+      });
+    });
+  });
+}
+
 app.get('/api/pack/:id', (req, res) => {
   const projects = loadProjects();
   const project = projects.find(p => p.id === req.params.id);
@@ -546,7 +649,7 @@ app.get('/api/deploy/:id', (req, res) => {
           String(now.getMinutes()).padStart(2, '0') +
           String(now.getSeconds()).padStart(2, '0');
 
-        const zipFolderName = project.packDirName || path.basename(project.zipPath, '.zip');
+        const zipFolderName = resolveProjectDeployFolderName(project);
         const commands = [
           { cmd: `cd "${deploy.deployPath}" && if [ -d "${zipFolderName}" ]; then mv "${zipFolderName}" "${zipFolderName}_${ts}"; fi`, desc: `备份 ${zipFolderName} -> ${zipFolderName}_${ts}` },
           { cmd: `unzip -o "${remoteZipPath}" -d "${deploy.deployPath}"`, desc: `解压 ${deployZipName}` }
@@ -591,11 +694,165 @@ app.get('/api/deploy/:id', (req, res) => {
 
   conn.on('error', (err) => done('SSH 连接失败: ' + err.message));
 
-  const connConfig = { host: deploy.host, port: deploy.port || 22, username: deploy.username };
-  if (deploy.privateKey) connConfig.privateKey = deploy.privateKey;
-  else if (deploy.password) connConfig.password = deploy.password;
+  conn.connect(buildSshConnConfig(deploy));
+});
 
-  conn.connect(connConfig);
+app.get('/api/list-backups/:id', (req, res) => {
+  const projects = loadProjects();
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+
+  const { deploy } = project;
+  if (!deploy || !deploy.host || !deploy.username || !deploy.deployPath) {
+    return res.status(400).json({ error: '部署信息不完整' });
+  }
+
+  const backupFolderName = resolveProjectDeployFolderName(project);
+  if (!backupFolderName) {
+    return res.status(400).json({ error: '缺少备份目录名称，请先至少打包一次项目后再试' });
+  }
+
+  const backupRootPath = String(deploy.backupPath || deploy.deployPath || '').trim();
+  if (!backupRootPath) {
+    return res.status(400).json({ error: '备份目录为空，无法读取列表' });
+  }
+
+  let responded = false;
+  const conn = new Client();
+  const done = (err, data) => {
+    if (responded) return;
+    responded = true;
+    try { conn.end(); } catch {}
+    if (err) res.status(500).json({ error: err });
+    else res.json(data);
+  };
+
+  conn.on('ready', async () => {
+    try {
+      const listed = await execRemoteCommand(conn, buildBackupDirectoryFindCommand(backupRootPath, backupFolderName));
+      const items = parseBackupDirectoryListOutput(listed.stdout);
+      done(null, {
+        success: true,
+        backupRootPath,
+        backupFolderName,
+        items
+      });
+    } catch (err) {
+      done(err.message || '读取备份目录失败');
+    }
+  });
+
+  conn.on('error', (err) => done('SSH 连接失败: ' + err.message));
+
+  conn.connect(buildSshConnConfig(deploy));
+});
+
+app.post('/api/delete-backups/:id', (req, res) => {
+  const projects = loadProjects();
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+
+  const { deploy } = project;
+  if (!deploy || !deploy.host || !deploy.username || !deploy.deployPath) {
+    return res.status(400).json({ error: '部署信息不完整' });
+  }
+
+  const backupFolderName = resolveProjectDeployFolderName(project);
+  if (!backupFolderName) {
+    return res.status(400).json({ error: '缺少备份目录名称，请先至少打包一次项目后再试' });
+  }
+
+  const backupRootPath = String(deploy.backupPath || deploy.deployPath || '').trim();
+  if (!backupRootPath) {
+    return res.status(400).json({ error: '备份目录为空，无法执行删除' });
+  }
+
+  const requestedDirectories = normalizeRequestedBackupDirectories(req.body?.directories);
+  if (!requestedDirectories.length) {
+    return res.status(400).json({ error: '请先选择要删除的备份目录' });
+  }
+
+  const namePattern = buildBackupDirectoryNamePattern(backupFolderName);
+  const invalidDirectories = requestedDirectories.filter((name) => {
+    if (!namePattern.test(name)) return true;
+    return name.includes('/') || name.includes('\\');
+  });
+  if (invalidDirectories.length) {
+    return res.status(400).json({ error: `存在非法备份目录名: ${invalidDirectories.join(', ')}` });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (type, data) => {
+    res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+  };
+
+  let responded = false;
+  const conn = new Client();
+  const done = (err, data) => {
+    if (responded) return;
+    responded = true;
+    try { conn.end(); } catch {}
+    if (err) send('error', { text: err });
+    else send('done', data);
+    res.end();
+  };
+
+  send('log', { text: `连接服务器 ${deploy.host}:${deploy.port || 22} ...` });
+
+  conn.on('ready', async () => {
+    send('log', { text: 'SSH 连接成功' });
+    send('log', { text: `备份目录: ${backupRootPath}` });
+    send('log', { text: `匹配规则: ${backupFolderName}_YYYYMMDD_HHmmss` });
+
+    try {
+      send('log', { text: '$ 复核备份目录' });
+      const listed = await execRemoteCommand(conn, buildBackupDirectoryFindCommand(backupRootPath, backupFolderName));
+      const existingDirectories = parseBackupDirectoryListOutput(listed.stdout);
+      const existingSet = new Set(existingDirectories);
+      const directoriesToDelete = requestedDirectories.filter((name) => existingSet.has(name));
+      const missingDirectories = requestedDirectories.filter((name) => !existingSet.has(name));
+
+      if (missingDirectories.length) {
+        missingDirectories.forEach((name) => send('log', { text: `已跳过不存在的目录: ${name}` }));
+      }
+
+      if (!directoriesToDelete.length) {
+        send('log', { text: '选中的备份目录都不存在，无需删除。' });
+        return done(null, {
+          success: true,
+          deletedCount: 0,
+          deletedDirectories: [],
+          missingDirectories
+        });
+      }
+
+      directoriesToDelete.forEach((name) => send('log', { text: `待删除: ${name}` }));
+      const deleteBatches = chunkItems(directoriesToDelete, 20);
+      for (let batchIndex = 0; batchIndex < deleteBatches.length; batchIndex += 1) {
+        const currentBatch = deleteBatches[batchIndex];
+        send('log', { text: `$ 执行删除批次 ${batchIndex + 1}/${deleteBatches.length}` });
+        await execRemoteCommand(conn, buildDeleteBackupDirectoriesCommand(backupRootPath, currentBatch));
+      }
+
+      send('log', { text: `删除完成，共删除 ${directoriesToDelete.length} 个备份目录。` });
+      done(null, {
+        success: true,
+        deletedCount: directoriesToDelete.length,
+        deletedDirectories: directoriesToDelete,
+        missingDirectories
+      });
+    } catch (err) {
+      done(err.message || '删除备份目录失败');
+    }
+  });
+
+  conn.on('error', (err) => done('SSH 连接失败: ' + err.message));
+
+  conn.connect(buildSshConnConfig(deploy));
 });
 
 app.post('/api/open-folder', (req, res) => {
@@ -619,6 +876,66 @@ app.post('/api/open-zip-folder', (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+function normalizeExternalAccessUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return '';
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return '';
+    }
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function openExternalAccessUrl(rawUrl) {
+  const accessUrl = normalizeExternalAccessUrl(rawUrl);
+  if (!accessUrl) {
+    throw new Error('访问地址无效，仅支持 http 或 https 地址');
+  }
+
+  let command = '';
+  let args = [];
+  if (process.platform === 'win32') {
+    command = 'explorer.exe';
+    args = [accessUrl];
+  } else if (process.platform === 'darwin') {
+    command = 'open';
+    args = [accessUrl];
+  } else {
+    command = 'xdg-open';
+    args = [accessUrl];
+  }
+
+  const result = spawnSync(command, args, {
+    stdio: 'ignore',
+    windowsHide: true
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+  if (typeof result.status === 'number' && result.status !== 0) {
+    throw new Error(`${command} 执行失败 (exit code ${result.status})`);
+  }
+
+  return accessUrl;
+}
+
+app.post('/api/open-access-url', (req, res) => {
+  try {
+    const accessUrl = openExternalAccessUrl(req.body?.accessUrl);
+    res.json({ success: true, accessUrl });
+  } catch (err) {
+    const message = err?.message || '打开访问地址失败';
+    const status = message.includes('访问地址无效') ? 400 : 500;
+    res.status(status).json({ error: message });
   }
 });
 

@@ -1,5 +1,7 @@
 ﻿let projects = [];
 let currentEditId = null;
+let currentEditBackupPath = "";
+let backupSelectorState = null;
 let parsedGitInfo = null;
 let projectSearchKeyword = "";
 let projectDeployFilter = "all";
@@ -17,6 +19,7 @@ let lastOperationStatusSnapshot = "";
 
 const terminal = document.getElementById("terminal");
 const terminalTitle = document.getElementById("terminalTitle");
+const terminalWorkbench = document.getElementById("terminalWorkbench");
 const toastRegion = document.getElementById("toastRegion");
 const srAnnouncement = document.getElementById("srAnnouncement");
 
@@ -341,6 +344,27 @@ function isHttpAccessUrl(url) {
   return /^https?:\/\//i.test(String(url || ""));
 }
 
+function getBackupFolderBaseName(project) {
+  const packDirName = String(project?.packDirName || "").trim();
+  if (packDirName) return packDirName;
+
+  const zipName = String(project?.zipName || "").trim();
+  if (zipName) {
+    const fileName = zipName.split(/[\\/]/).pop() || zipName;
+    return fileName.replace(/\.zip$/i, "");
+  }
+
+  const zipPath = String(project?.zipPath || "").trim();
+  const fileName = zipPath.split(/[\\/]/).pop() || "";
+  return fileName.replace(/\.zip$/i, "");
+}
+
+function getBackupRootPath(project) {
+  const backupPath = String(project?.deploy?.backupPath || "").trim();
+  if (backupPath) return backupPath;
+  return String(project?.deploy?.deployPath || "").trim();
+}
+
 function getRecentDirs() {
   try {
     const value = window.localStorage.getItem(RECENT_DIRS_KEY);
@@ -606,6 +630,29 @@ async function openFolderByPath(rawPath) {
   }
 }
 
+async function openAccessUrlExternally(rawUrl) {
+  const accessUrl = normalizeAccessUrl(rawUrl);
+  if (!accessUrl) {
+    showToast("访问地址为空，无法打开。", "warn");
+    return false;
+  }
+  if (!isHttpAccessUrl(accessUrl)) {
+    showToast("仅支持打开 http 或 https 访问地址。", "warn");
+    return false;
+  }
+
+  try {
+    await api("/api/open-access-url", {
+      method: "POST",
+      body: { accessUrl }
+    });
+    return true;
+  } catch (error) {
+    showToast(`打开失败：${normalizeErrorMessage(error.message)}`, "error");
+    return false;
+  }
+}
+
 async function api(url, options = {}) {
   const init = {
     method: "GET",
@@ -712,7 +759,7 @@ function renderList() {
       const accessUrl = normalizeAccessUrl(project.accessUrl);
       const accessUrlHtml = accessUrl
         ? (isHttpAccessUrl(accessUrl)
-          ? `<a class="card-link" href="${escapeHtml(accessUrl)}" target="_blank" rel="noopener noreferrer" translate="no">${escapeHtml(accessUrl)}</a>`
+          ? `<button class="card-link card-link-button btn-open-access-url" type="button" data-url="${escapeHtml(accessUrl)}" title="点击用默认浏览器打开" aria-label="在默认浏览器中打开 ${projectName} 的访问地址" translate="no">${escapeHtml(accessUrl)}</button>`
           : escapeHtml(accessUrl))
         : "未填写";
       const buildCmd = escapeHtml(safeText(project.buildCmd, "npm run build"));
@@ -747,6 +794,13 @@ function renderList() {
 
       const statusText = runtime.deployed ? "已部署" : "未部署";
       const statusClass = runtime.deployed ? "success" : "";
+      const backupFolderBaseName = getBackupFolderBaseName(project);
+      const backupDeleteTip = !runtime.deployConfigured
+        ? "请先配置部署信息"
+        : (!connAuthReady
+          ? "请先配置密码或私钥"
+          : (!backupFolderBaseName ? "缺少备份目录名称，请先至少打包一次项目" : ""));
+      const backupDeleteReady = runtime.deployConfigured && connAuthReady && Boolean(backupFolderBaseName);
 
       return `
       <article class="project-card" data-id="${projectId}">
@@ -860,13 +914,24 @@ function renderList() {
         ` : ""}
         <div class="card-danger-zone">
           <span class="card-danger-label">危险操作</span>
-          <button
-            class="btn btn-sm btn-danger btn-delete"
-            type="button"
-            data-id="${projectId}"
-            data-name="${projectName}"
-            aria-label="删除 ${projectName}"
-          >删除项目</button>
+          <div class="card-danger-actions">
+            <button
+              class="btn btn-sm btn-danger btn-delete-backups"
+              type="button"
+              data-id="${projectId}"
+              data-name="${projectName}"
+              ${backupDeleteReady ? "" : "disabled"}
+              ${backupDeleteTip ? `title="${backupDeleteTip}"` : ""}
+              aria-label="批量删除 ${projectName} 的备份文件夹"
+            >批量删备份</button>
+            <button
+              class="btn btn-sm btn-danger btn-delete"
+              type="button"
+              data-id="${projectId}"
+              data-name="${projectName}"
+              aria-label="删除 ${projectName}"
+            >删除项目</button>
+          </div>
         </div>
       </article>
       `;
@@ -1030,7 +1095,62 @@ if (btnConfirmOk) {
   btnConfirmOk.addEventListener("click", () => settleConfirm(true));
 }
 
+function clearTerminalWorkbench() {
+  backupSelectorState = null;
+  if (!terminalWorkbench) return;
+  terminalWorkbench.hidden = true;
+  terminalWorkbench.innerHTML = "";
+}
+
+function renderBackupSelectorWorkbench() {
+  if (!terminalWorkbench) return;
+
+  const state = backupSelectorState;
+  if (!state || !Array.isArray(state.items) || !state.items.length) {
+    terminalWorkbench.hidden = true;
+    terminalWorkbench.innerHTML = "";
+    return;
+  }
+
+  const totalCount = state.items.length;
+  const selectedCount = state.items.filter((item) => item.selected).length;
+  const selectedLabel = `已选 ${selectedCount} / ${totalCount}`;
+
+  terminalWorkbench.hidden = false;
+  terminalWorkbench.innerHTML = `
+    <div class="terminal-workbench-head">
+      <div class="terminal-workbench-copy">
+        <div class="terminal-workbench-title">待删除备份列表</div>
+        <div class="terminal-workbench-meta">项目：${escapeHtml(state.projectName)}</div>
+        <div class="terminal-workbench-meta">目录：${escapeHtml(state.backupRootPath)}</div>
+        <div class="terminal-workbench-meta">规则：${escapeHtml(state.backupFolderBaseName)}_YYYYMMDD_HHmmss</div>
+      </div>
+      <div class="terminal-workbench-count">${selectedLabel}</div>
+    </div>
+    <div class="terminal-workbench-actions">
+      <button class="btn btn-xs btn-secondary" type="button" data-terminal-action="select-all" ${state.pending ? "disabled" : ""}>全选</button>
+      <button class="btn btn-xs btn-secondary" type="button" data-terminal-action="invert-selection" ${state.pending ? "disabled" : ""}>反选</button>
+      <button class="btn btn-xs btn-secondary" type="button" data-terminal-action="clear-selector" ${state.pending ? "disabled" : ""}>关闭列表</button>
+      <button class="btn btn-xs btn-danger" type="button" data-terminal-action="delete-selected" ${(state.pending || selectedCount === 0) ? "disabled" : ""}>下一步删除选中项</button>
+    </div>
+    <div class="backup-selector-list" role="group" aria-label="备份目录选择列表">
+      ${state.items.map((item, index) => `
+        <label class="backup-selector-item">
+          <input
+            type="checkbox"
+            data-terminal-backup-index="${index}"
+            ${item.selected ? "checked" : ""}
+            ${state.pending ? "disabled" : ""}
+          >
+          <span class="backup-selector-name">${escapeHtml(item.name)}</span>
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
 function resetTerminal() {
+  clearTerminalWorkbench();
   terminal.innerHTML = '<div class="terminal-line hint">等待操作...</div>';
   terminalTitle.textContent = "操作终端";
   setOperationStatus("idle", "状态：空闲");
@@ -1044,8 +1164,11 @@ function appendTerminal(text, type = "") {
   terminal.scrollTop = terminal.scrollHeight;
 }
 
-function termClear() {
+function termClear({ preserveWorkbench = false } = {}) {
   terminal.innerHTML = "";
+  if (!preserveWorkbench) {
+    clearTerminalWorkbench();
+  }
 }
 
 function termLog(text) {
@@ -1073,6 +1196,47 @@ function termSeparator(label) {
 }
 
 byId("btnClearTerminal").addEventListener("click", resetTerminal);
+
+if (terminalWorkbench) {
+  terminalWorkbench.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("input[data-terminal-backup-index]");
+    if (!checkbox || !backupSelectorState || backupSelectorState.pending) return;
+
+    const index = Number.parseInt(checkbox.dataset.terminalBackupIndex, 10);
+    if (!Number.isInteger(index) || index < 0 || index >= backupSelectorState.items.length) return;
+
+    backupSelectorState.items[index].selected = Boolean(checkbox.checked);
+    renderBackupSelectorWorkbench();
+  });
+
+  terminalWorkbench.addEventListener("click", async (event) => {
+    const actionButton = event.target.closest("button[data-terminal-action]");
+    if (!actionButton || !backupSelectorState || backupSelectorState.pending) return;
+
+    const action = actionButton.dataset.terminalAction;
+    if (action === "select-all") {
+      backupSelectorState.items.forEach((item) => { item.selected = true; });
+      renderBackupSelectorWorkbench();
+      return;
+    }
+
+    if (action === "invert-selection") {
+      backupSelectorState.items.forEach((item) => { item.selected = !item.selected; });
+      renderBackupSelectorWorkbench();
+      return;
+    }
+
+    if (action === "clear-selector") {
+      clearTerminalWorkbench();
+      showToast("备份选择列表已关闭。", "info", 1800);
+      return;
+    }
+
+    if (action === "delete-selected") {
+      await deleteSelectedBackupsFromWorkbench();
+    }
+  });
+}
 
 function runSSE(url, label) {
   return new Promise((resolve, reject) => {
@@ -1122,6 +1286,123 @@ function runSSE(url, label) {
       finish(() => reject(new Error("日志连接中断，请重试。")));
     };
   });
+}
+
+async function runStreamingFetch(url, label, options = {}) {
+  terminalTitle.textContent = label;
+  setOperationStatus("running", `状态：${label}进行中`, "最近动作：日志流已连接");
+
+  const init = {
+    method: "POST",
+    headers: { ...(options.headers || {}) },
+    ...options
+  };
+
+  if (Object.prototype.hasOwnProperty.call(options, "body")) {
+    const body = options.body;
+    if (typeof body === "string") {
+      init.body = body;
+      init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
+    } else {
+      init.body = JSON.stringify(body ?? {});
+      init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
+    }
+  }
+
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    let message = `请求失败 (${response.status})`;
+    try {
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const data = await response.json();
+        message = data?.error || message;
+      } else {
+        const text = await response.text();
+        if (text.trim()) message = text.trim();
+      }
+    } catch {}
+    setOperationStatus("error", `状态：${label}失败`);
+    throw new Error(message);
+  }
+
+  if (!response.body) {
+    setOperationStatus("error", `状态：${label}失败`);
+    throw new Error("日志流不可用，请重试。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let streamResult = null;
+  let streamError = null;
+
+  const consumeEventBlock = (block) => {
+    const dataLines = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart());
+
+    if (!dataLines.length) return;
+
+    let data;
+    try {
+      data = JSON.parse(dataLines.join("\n"));
+    } catch {
+      termError("日志解析失败。");
+      return;
+    }
+
+    if (data.type === "log") {
+      if (String(data.text || "").startsWith("$ ")) termCmd(data.text);
+      else termLog(data.text);
+      return;
+    }
+
+    if (data.type === "done") {
+      termSuccess("操作完成。");
+      setOperationStatus("success", `状态：${label}完成`);
+      streamResult = data;
+      return;
+    }
+
+    if (data.type === "error") {
+      termError(data.text || "操作失败。");
+      setOperationStatus("error", `状态：${label}失败`);
+      streamError = new Error(data.text || "操作失败。");
+    }
+  };
+
+  try {
+    while (!streamResult && !streamError) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      let splitIndex = buffer.indexOf("\n\n");
+      while (splitIndex !== -1) {
+        const block = buffer.slice(0, splitIndex);
+        buffer = buffer.slice(splitIndex + 2);
+        consumeEventBlock(block);
+        if (streamResult || streamError) break;
+        splitIndex = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+  }
+
+  if (!streamResult && !streamError && buffer.trim()) {
+    consumeEventBlock(buffer);
+  }
+
+  if (streamError) throw streamError;
+  if (streamResult) return streamResult;
+
+  setOperationStatus("error", `状态：${label}中断`, "最近动作：日志连接中断");
+  throw new Error("日志连接中断，请重试。");
 }
 
 function withButtonLoading(button, loadingText, task) {
@@ -1354,6 +1635,131 @@ async function testProjectConnection(projectId, triggerButton) {
       showToast(`连接失败：${message}`, "error", 3400);
     }
   });
+}
+
+async function openBackupSelector(projectId, triggerButton) {
+  const project = getProjectById(projectId);
+  if (!project) {
+    showToast("未找到项目，无法读取备份列表。", "warn");
+    return;
+  }
+
+  const backupFolderBaseName = getBackupFolderBaseName(project);
+  if (!backupFolderBaseName) {
+    showToast("缺少备份目录名称，请先至少打包一次项目。", "warn");
+    return;
+  }
+
+  const projectName = safeText(project.projectName, "当前项目");
+  const backupRootPath = getBackupRootPath(project);
+  const runner = triggerButton
+    ? (task) => withButtonLoading(triggerButton, "读取中...", task)
+    : (task) => Promise.resolve(task());
+
+  await runner(async () => {
+    termClear();
+    terminalTitle.textContent = `备份选择 ${projectName}`;
+    termSeparator(`读取备份 ${projectName}`);
+    termCmd(`目标目录：${backupRootPath}`);
+    termLog(`匹配规则：${backupFolderBaseName}_YYYYMMDD_HHmmss`);
+    setOperationStatus("running", "状态：备份列表读取中", `最近动作：正在扫描 ${projectName} 的备份目录`);
+
+    try {
+      const result = await api(`/api/list-backups/${projectId}`);
+      const items = Array.isArray(result?.items) ? result.items : [];
+
+      if (!items.length) {
+        termLog("未发现可删除的备份目录。");
+        setOperationStatus("success", "状态：未发现备份目录");
+        showToast("未发现可删除的备份目录。", "info", 2200);
+        return;
+      }
+
+      backupSelectorState = {
+        projectId,
+        projectName,
+        backupRootPath: safeText(result.backupRootPath, backupRootPath),
+        backupFolderBaseName: safeText(result.backupFolderName, backupFolderBaseName),
+        items: items.map((name) => ({ name: String(name), selected: true })),
+        pending: false
+      };
+      renderBackupSelectorWorkbench();
+      termSuccess(`已加载 ${items.length} 个备份目录，请在上方勾选后继续删除。`);
+      setOperationStatus("success", "状态：备份列表已就绪", `最近动作：已加载 ${items.length} 个备份目录`);
+      showToast(`已读取 ${items.length} 个备份目录。`, "success");
+    } catch (error) {
+      termError(`读取失败：${normalizeErrorMessage(error.message)}`);
+      setOperationStatus("error", "状态：备份列表读取失败");
+      showToast(`读取备份失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
+    }
+  });
+}
+
+async function deleteSelectedBackupsFromWorkbench() {
+  if (!backupSelectorState || backupSelectorState.pending) return;
+
+  const selectedDirectories = backupSelectorState.items
+    .filter((item) => item.selected)
+    .map((item) => item.name);
+
+  if (!selectedDirectories.length) {
+    showToast("请先勾选要删除的备份目录。", "warn");
+    return;
+  }
+
+  const confirmed = await askConfirm({
+    title: "确认删除已选备份",
+    message: `将删除已选中的 ${selectedDirectories.length} 个备份目录，操作不可恢复。是否继续？`,
+    confirmText: "确认删除",
+    tone: "danger"
+  });
+  if (!confirmed) return;
+
+  backupSelectorState.pending = true;
+  renderBackupSelectorWorkbench();
+
+  try {
+    termClear({ preserveWorkbench: true });
+    termSeparator(`删除备份 ${backupSelectorState.projectName}`);
+    termCmd(`准备删除 ${selectedDirectories.length} 个备份目录...`);
+
+    const result = await runStreamingFetch(
+      `/api/delete-backups/${backupSelectorState.projectId}`,
+      `删除备份 ${backupSelectorState.projectName}`,
+      {
+        method: "POST",
+        body: { directories: selectedDirectories }
+      }
+    );
+
+    const deletedDirectories = Array.isArray(result?.deletedDirectories) ? result.deletedDirectories : [];
+    const missingDirectories = Array.isArray(result?.missingDirectories) ? result.missingDirectories : [];
+    const removedSet = new Set([...deletedDirectories, ...missingDirectories]);
+
+    if (missingDirectories.length) {
+      termWarn(`有 ${missingDirectories.length} 个目录已不存在，已自动跳过。`);
+    }
+
+    backupSelectorState.items = backupSelectorState.items.filter((item) => !removedSet.has(item.name));
+    backupSelectorState.pending = false;
+
+    if (!backupSelectorState.items.length) {
+      clearTerminalWorkbench();
+      termLog("备份目录已处理完毕，选择列表已清空。");
+    } else {
+      renderBackupSelectorWorkbench();
+    }
+
+    if (deletedDirectories.length) {
+      showToast(`已删除 ${deletedDirectories.length} 个备份目录。`, "success");
+    } else {
+      showToast("没有删除任何备份目录。", "info", 2200);
+    }
+  } catch (error) {
+    backupSelectorState.pending = false;
+    renderBackupSelectorWorkbench();
+    showToast(`删除备份失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
+  }
 }
 
 function clearAddModal() {
@@ -1589,6 +1995,11 @@ byId("projectList").addEventListener("click", async (event) => {
   const projectId = button.dataset.id;
   const projectName = button.dataset.name || "";
 
+  if (button.classList.contains("btn-open-access-url")) {
+    await openAccessUrlExternally(button.dataset.url);
+    return;
+  }
+
   if (button.classList.contains("btn-open-folder")) {
     const dirPath = button.dataset.path;
     await openFolderByPath(dirPath);
@@ -1680,6 +2091,11 @@ byId("projectList").addEventListener("click", async (event) => {
     return;
   }
 
+  if (button.classList.contains("btn-delete-backups")) {
+    await openBackupSelector(projectId, button);
+    return;
+  }
+
   if (button.classList.contains("btn-delete")) {
     const targetName = button.dataset.name || "当前项目";
     const confirmed = await askConfirm({
@@ -1752,6 +2168,7 @@ function openEditModal(id) {
   byId("editPassword").value = safeText(deploy.password, "");
   byId("editPrivateKey").value = safeText(deploy.privateKey, "");
   byId("editDeployPath").value = safeText(deploy.deployPath, "");
+  currentEditBackupPath = String(deploy.backupPath || "").trim();
 
   switchEditAuthTab(deploy.privateKey ? "key" : "password");
   $(".edit-json-hint").textContent = "";
@@ -1832,6 +2249,7 @@ byId("editInputJsonFile").addEventListener("change", async () => {
     if (data.port) byId("editPort").value = data.port;
     if (data.username) byId("editUsername").value = data.username;
     if (data.deployPath) byId("editDeployPath").value = data.deployPath;
+    currentEditBackupPath = String(data.backupPath || "").trim();
 
     if (data.privateKey) {
       byId("editPrivateKey").value = data.privateKey;
@@ -1894,6 +2312,10 @@ byId("btnSaveEdit").addEventListener("click", async () => {
       username,
       deployPath
     };
+
+    if (currentEditBackupPath) {
+      update.deploy.backupPath = currentEditBackupPath;
+    }
 
     if (activeAuth === "password") {
       update.deploy.password = byId("editPassword").value;
