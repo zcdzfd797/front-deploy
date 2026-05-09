@@ -91,58 +91,36 @@ fn resolve_server_root(app_handle: &AppHandle) -> io::Result<PathBuf> {
   }
 
   let mut checked = Vec::new();
+  let mut candidates: Vec<PathBuf> = Vec::new();
 
   if let Ok(server_entry) = app_handle.path().resolve("server.js", BaseDirectory::Resource) {
-    checked.push(server_entry.clone());
-    if server_entry.exists() {
-      if let Some(parent) = server_entry.parent() {
-        return Ok(parent.to_path_buf());
-      }
+    if let Some(parent) = server_entry.parent() {
+      candidates.push(parent.to_path_buf());
     }
   }
 
   if let Ok(resource_dir) = app_handle.path().resource_dir() {
-    let direct = resource_dir.join("server.js");
-    checked.push(direct.clone());
-    if direct.exists() {
-      return Ok(resource_dir.clone());
-    }
-
-    let up_dir = resource_dir.join("_up_");
-    let up_entry = up_dir.join("server.js");
-    checked.push(up_entry.clone());
-    if up_entry.exists() {
-      return Ok(up_dir);
-    }
+    candidates.push(resource_dir.clone());
+    candidates.push(resource_dir.join("_up_"));
   }
 
   if let Ok(exe_path) = std::env::current_exe() {
     if let Some(exe_dir) = exe_path.parent() {
-      let direct = exe_dir.join("server.js");
-      checked.push(direct.clone());
-      if direct.exists() {
-        return Ok(exe_dir.to_path_buf());
-      }
+      candidates.push(exe_dir.to_path_buf());
+      candidates.push(exe_dir.join("_up_"));
+      candidates.push(exe_dir.join("resources"));
+      candidates.push(exe_dir.join("resources").join("_up_"));
+    }
+  }
 
-      let resources = exe_dir.join("resources");
-      checked.push(resources.join("server.js"));
-      if resources.join("server.js").exists() {
-        return Ok(resources);
-      }
+  candidates.sort();
+  candidates.dedup();
 
-      let up_dir = exe_dir.join("_up_");
-      let up_entry = up_dir.join("server.js");
-      checked.push(up_entry.clone());
-      if up_entry.exists() {
-        return Ok(up_dir);
-      }
-
-      let resources_up = exe_dir.join("resources").join("_up_");
-      let resources_up_entry = resources_up.join("server.js");
-      checked.push(resources_up_entry.clone());
-      if resources_up_entry.exists() {
-        return Ok(resources_up);
-      }
+  for dir in &candidates {
+    let server_js = dir.join("server.js");
+    checked.push(server_js.clone());
+    if server_js.exists() {
+      return Ok(dir.clone());
     }
   }
 
@@ -159,6 +137,62 @@ fn resolve_server_root(app_handle: &AppHandle) -> io::Result<PathBuf> {
   ))
 }
 
+fn resolve_node_path(app_handle: &AppHandle) -> io::Result<PathBuf> {
+  if !cfg!(debug_assertions) {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+      candidates.push(resource_dir.join("bin").join("node.exe"));
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+      if let Some(exe_dir) = exe_path.parent() {
+        candidates.push(exe_dir.join("bin").join("node.exe"));
+        candidates.push(exe_dir.join("resources").join("bin").join("node.exe"));
+        candidates.push(exe_dir.join("_up_").join("bin").join("node.exe"));
+      }
+    }
+
+    for candidate in &candidates {
+      if candidate.exists() {
+        return Ok(candidate.clone());
+      }
+    }
+  }
+
+  let system_node = which_node()?;
+  Ok(system_node)
+}
+
+fn which_node() -> io::Result<PathBuf> {
+  let output = std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+    .arg("node")
+    .output()?;
+
+  if !output.status.success() {
+    return Err(io::Error::new(
+      io::ErrorKind::NotFound,
+      "Node.js not found in system PATH",
+    ));
+  }
+
+  let binding = String::from_utf8_lossy(&output.stdout);
+  let path_str = binding
+    .lines()
+    .next()
+    .unwrap_or("")
+    .trim();
+
+  if path_str.is_empty() {
+    return Err(io::Error::new(
+      io::ErrorKind::NotFound,
+      "Node.js not found in system PATH",
+    ));
+  }
+
+  Ok(PathBuf::from(path_str))
+}
+
 fn start_local_server(app_handle: &AppHandle) -> io::Result<(Child, u16)> {
   let server_root = resolve_server_root(app_handle)?;
   let entry = server_root.join("server.js");
@@ -169,10 +203,11 @@ fn start_local_server(app_handle: &AppHandle) -> io::Result<(Child, u16)> {
     ));
   }
 
+  let node_path = resolve_node_path(app_handle)?;
   let port = pick_available_port()?;
   let instance_id = generate_instance_id();
 
-  let mut child = Command::new("node")
+  let mut child = Command::new(&node_path)
     .arg("--openssl-legacy-provider")
     .arg("server.js")
     .env("HOST", LOCAL_SERVER_HOST)
@@ -186,7 +221,7 @@ fn start_local_server(app_handle: &AppHandle) -> io::Result<(Child, u16)> {
     .map_err(|err| {
       io::Error::new(
         io::ErrorKind::NotFound,
-        format!("Failed to start local service: {err}. Please ensure Node.js is installed."),
+        format!("Failed to start local service: {err}. Node path: {}", node_path.display()),
       )
     })?;
 

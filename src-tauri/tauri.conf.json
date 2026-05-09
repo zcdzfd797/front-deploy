@@ -34,7 +34,8 @@
       "../package.json",
       "../package-lock.json",
       "../public",
-      "../node_modules"
+      "../node_modules",
+      "bin/node.exe"
     ]
   }
 }
