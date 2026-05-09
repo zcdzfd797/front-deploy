@@ -1507,6 +1507,121 @@ function getProjectById(projectId) {
   return projects.find((item) => item.id === projectId) || null;
 }
 
+function hasReusableDeployConfig(project) {
+  const deploy = project?.deploy || {};
+  return Boolean(
+    String(deploy.host || "").trim() ||
+    String(deploy.username || "").trim() ||
+    String(deploy.password || "").trim() ||
+    String(deploy.privateKey || "").trim() ||
+    String(deploy.deployPath || "").trim() ||
+    String(deploy.backupPath || "").trim()
+  );
+}
+
+function getReusableDeployCandidates(currentProjectId, preferredGroupName) {
+  const currentGroupName = normalizeGroupName(preferredGroupName);
+  return projects
+    .filter((project) => String(project.id || "") !== String(currentProjectId || ""))
+    .filter(hasReusableDeployConfig)
+    .sort((a, b) => {
+      const aSameGroup = normalizeGroupName(a.groupName) === currentGroupName;
+      const bSameGroup = normalizeGroupName(b.groupName) === currentGroupName;
+      if (aSameGroup !== bSameGroup) return aSameGroup ? -1 : 1;
+
+      const groupCompare = normalizeGroupName(a.groupName).localeCompare(
+        normalizeGroupName(b.groupName),
+        "zh-Hans-CN"
+      );
+      if (groupCompare !== 0) return groupCompare;
+
+      const nameCompare = safeText(a.projectName, "").localeCompare(
+        safeText(b.projectName, ""),
+        "zh-Hans-CN"
+      );
+      if (nameCompare !== 0) return nameCompare;
+
+      const aTime = new Date(a.createdAt || 0).getTime();
+      const bTime = new Date(b.createdAt || 0).getTime();
+      return bTime - aTime;
+    });
+}
+
+function formatReusableProjectLabel(project, preferredGroupName) {
+  const sameGroup = normalizeGroupName(project.groupName) === normalizeGroupName(preferredGroupName);
+  const deploy = project?.deploy || {};
+  const authMode = String(deploy.privateKey || "").trim() ? "私钥" : (
+    String(deploy.password || "").trim() ? "密码" : "未配认证"
+  );
+  const prefix = sameGroup ? "同组优先 | " : "";
+  return `${prefix}${safeText(project.projectName)} | ${normalizeGroupName(project.groupName)} | ${safeText(deploy.host)} | ${safeText(deploy.deployPath)} | ${authMode}`;
+}
+
+function setEditDeployHint(message, color = "") {
+  const hint = $(".edit-json-hint");
+  if (!hint) return;
+  hint.textContent = String(message || "");
+  hint.style.color = color;
+}
+
+function renderReuseProjectOptions({ forceOpen = false } = {}) {
+  const row = byId("editReuseConfigRow");
+  const select = byId("editReuseProjectSelect");
+  const applyBtn = byId("btnApplyReuseProjectConfig");
+  const currentProject = getProjectById(currentEditId);
+  if (!row || !select || !applyBtn || !currentProject) return [];
+
+  const preferredGroupName = byId("editGroupName")?.value || currentProject.groupName;
+  const previousValue = select.value;
+  const candidates = getReusableDeployCandidates(currentEditId, preferredGroupName);
+
+  if (!candidates.length) {
+    select.innerHTML = '<option value="">暂无可复用项目配置</option>';
+    select.value = "";
+    select.disabled = true;
+    applyBtn.disabled = true;
+    row.hidden = !forceOpen;
+    return [];
+  }
+
+  select.innerHTML = [
+    '<option value="">请选择项目配置…</option>',
+    ...candidates.map((project) => (
+      `<option value="${escapeHtml(project.id)}">${escapeHtml(formatReusableProjectLabel(project, preferredGroupName))}</option>`
+    ))
+  ].join("");
+
+  select.disabled = false;
+  applyBtn.disabled = false;
+  row.hidden = !forceOpen;
+
+  const hasPrevious = candidates.some((project) => String(project.id) === previousValue);
+  if (hasPrevious) {
+    select.value = previousValue;
+  } else if (candidates[0]) {
+    select.value = String(candidates[0].id);
+  }
+
+  return candidates;
+}
+
+function applyDeployConfigFromProject(sourceProject) {
+  if (!sourceProject) return false;
+
+  const deploy = sourceProject.deploy || {};
+  byId("editHost").value = safeText(deploy.host, "");
+  byId("editPort").value = safeText(deploy.port, "22");
+  byId("editUsername").value = safeText(deploy.username, "");
+  byId("editPassword").value = safeText(deploy.password, "");
+  byId("editPrivateKey").value = safeText(deploy.privateKey, "");
+  byId("editDeployPath").value = safeText(deploy.deployPath, "");
+  currentEditBackupPath = String(deploy.backupPath || "").trim();
+
+  switchEditAuthTab(String(deploy.privateKey || "").trim() ? "key" : "password");
+  setEditDeployHint(`已复用：${safeText(sourceProject.projectName)} 的部署配置`);
+  return true;
+}
+
 async function refreshProjectGit(projectId, triggerButton) {
   const project = getProjectById(projectId);
   if (!project) {
@@ -2171,8 +2286,13 @@ function openEditModal(id) {
   currentEditBackupPath = String(deploy.backupPath || "").trim();
 
   switchEditAuthTab(deploy.privateKey ? "key" : "password");
-  $(".edit-json-hint").textContent = "";
-  $(".edit-json-hint").style.color = "";
+  setEditDeployHint("");
+  byId("editReuseConfigRow").hidden = true;
+  byId("editReuseProjectSelect").innerHTML = '<option value="">请选择项目配置…</option>';
+  byId("editReuseProjectSelect").value = "";
+  byId("editReuseProjectSelect").disabled = false;
+  byId("btnApplyReuseProjectConfig").disabled = false;
+  renderReuseProjectOptions();
   byId("editRecentDir").value = "";
   syncEditModalOverlayMetrics();
   updateEditingCardHighlight();
@@ -2222,6 +2342,12 @@ byId("editAccessUrl").addEventListener("change", () => {
   byId("editAccessUrl").value = normalizeAccessUrl(byId("editAccessUrl").value);
 });
 
+byId("editGroupName").addEventListener("change", () => {
+  if (!byId("editReuseConfigRow").hidden) {
+    renderReuseProjectOptions({ forceOpen: true });
+  }
+});
+
 $$(".edit-auth-tabs .tab-btn").forEach((tab) => {
   tab.addEventListener("click", () => switchEditAuthTab(tab.dataset.auth));
 });
@@ -2230,11 +2356,47 @@ $(".btn-import-json-edit").addEventListener("click", () => {
   byId("editInputJsonFile").click();
 });
 
+$(".btn-reuse-project-config").addEventListener("click", () => {
+  const row = byId("editReuseConfigRow");
+  if (!row) return;
+
+  const shouldOpen = row.hidden;
+  const candidates = renderReuseProjectOptions({ forceOpen: shouldOpen });
+  if (!candidates.length) {
+    row.hidden = false;
+    setEditDeployHint("暂无可复用的项目部署配置。", "#8b6117");
+    showToast("暂无可复用的项目部署配置。", "info", 2200);
+    return;
+  }
+
+  row.hidden = !shouldOpen;
+  if (shouldOpen) {
+    setEditDeployHint(`已为你按同组优先排好 ${candidates.length} 个可复用配置。`);
+  }
+});
+
+byId("btnApplyReuseProjectConfig").addEventListener("click", () => {
+  const selectedId = byId("editReuseProjectSelect").value;
+  if (!selectedId) {
+    showToast("请先选择要复用的项目配置。", "warn");
+    return;
+  }
+
+  const sourceProject = getProjectById(selectedId);
+  if (!sourceProject || !hasReusableDeployConfig(sourceProject)) {
+    showToast("所选项目没有可复用的部署配置。", "warn");
+    return;
+  }
+
+  applyDeployConfigFromProject(sourceProject);
+  byId("editReuseConfigRow").hidden = true;
+  showToast(`已复用 ${safeText(sourceProject.projectName)} 的部署配置。`, "success");
+});
+
 byId("editInputJsonFile").addEventListener("change", async () => {
   const file = byId("editInputJsonFile").files[0];
   if (!file) return;
 
-  const hint = $(".edit-json-hint");
   const formData = new FormData();
   formData.append("file", file);
 
@@ -2242,8 +2404,7 @@ byId("editInputJsonFile").addEventListener("change", async () => {
     const data = await api("/api/import-json", { method: "POST", body: formData });
     const connName = safeText(data.connectionName, file.name.replace(/\.json$/i, ""));
 
-    hint.textContent = `已导入：${connName}`;
-    hint.style.color = "";
+    setEditDeployHint(`已导入：${connName}`);
 
     if (data.host) byId("editHost").value = data.host;
     if (data.port) byId("editPort").value = data.port;
@@ -2259,8 +2420,7 @@ byId("editInputJsonFile").addEventListener("change", async () => {
     if (data.password) {
       if (data.encryptedPassword) {
         byId("editPassword").value = "";
-        hint.textContent = `已导入：${connName}（密码为加密存储，请手动填写明文密码）`;
-        hint.style.color = "#e65d5d";
+        setEditDeployHint(`已导入：${connName}（密码为加密存储，请手动填写明文密码）`, "#e65d5d");
         showToast("JSON 中密码为加密值，请手动输入服务器明文密码。", "warn", 3600);
       } else {
         byId("editPassword").value = data.password;

@@ -222,7 +222,14 @@
           <div class="input-row">
             <input type="file" id="editInputJsonFile" name="sshConfig" accept=".json" hidden>
             <button class="btn btn-secondary btn-import-json-edit" type="button">导入 JSON</button>
+            <button class="btn btn-secondary btn-reuse-project-config" type="button">复用项目配置</button>
             <span class="hint edit-json-hint"></span>
+          </div>
+          <div class="path-quick-row" id="editReuseConfigRow" hidden>
+            <select id="editReuseProjectSelect" aria-label="选择要复用的项目配置">
+              <option value="">请选择项目配置…</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" type="button" id="btnApplyReuseProjectConfig">应用</button>
           </div>
         </div>
 
