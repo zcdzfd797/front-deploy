@@ -15,17 +15,6 @@ const GROUP_UNKNOWN_NAME = "未知组";
 let activeGroupKey = GROUP_ALL_KEY;
 let groupFeedbackTimer = null;
 let groupFeedbackToken = 0;
-let lastOperationStatusSnapshot = "";
-
-const terminal = document.getElementById("terminal");
-const terminalTitle = document.getElementById("terminalTitle");
-const terminalWorkbench = document.getElementById("terminalWorkbench");
-const toastRegion = document.getElementById("toastRegion");
-const srAnnouncement = document.getElementById("srAnnouncement");
-
-const $ = (selector, scope = document) => scope.querySelector(selector);
-const $$ = (selector, scope = document) => Array.from(scope.querySelectorAll(selector));
-const byId = (id) => document.getElementById(id);
 
 function normalizeGroupName(groupName) {
   const normalized = String(groupName ?? "").trim();
@@ -320,30 +309,6 @@ function renderGroupList() {
   groupList.innerHTML = html;
 }
 
-function normalizePath(dirPath) {
-  if (dirPath === null || dirPath === undefined) return "";
-  let normalized = String(dirPath).trim().replace(/\//g, "\\");
-  if (!normalized) return "";
-  if (/^[a-zA-Z]:\\?$/.test(normalized)) {
-    return normalized.endsWith("\\") ? normalized : `${normalized}\\`;
-  }
-  return normalized.replace(/[\\]+$/, "");
-}
-
-function normalizeAccessUrl(rawUrl) {
-  const value = String(rawUrl ?? "").trim();
-  if (!value) return "";
-  if (/^https?:\/\//i.test(value)) return value;
-  if (/^(localhost|(\d{1,3}\.){3}\d{1,3}|[a-z0-9.-]+\.[a-z]{2,})(:\d+)?(\/.*)?$/i.test(value)) {
-    return `http://${value}`;
-  }
-  return value;
-}
-
-function isHttpAccessUrl(url) {
-  return /^https?:\/\//i.test(String(url || ""));
-}
-
 function getBackupFolderBaseName(project) {
   const packDirName = String(project?.packDirName || "").trim();
   if (packDirName) return packDirName;
@@ -418,20 +383,6 @@ function rememberDir(dirPath) {
   renderRecentDirOptions();
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function safeText(value, fallback = "-") {
-  if (value === null || value === undefined || value === "") return fallback;
-  return String(value);
-}
-
 function isDeployed(project) {
   if (!project) return false;
   if (project.lastDeployTime) return true;
@@ -451,14 +402,6 @@ function hasDeployAuth(project) {
     String(deploy.password || "").trim() ||
     String(deploy.privateKey || "").trim()
   );
-}
-
-function announce(message) {
-  if (!srAnnouncement || !message) return;
-  srAnnouncement.textContent = "";
-  window.setTimeout(() => {
-    srAnnouncement.textContent = String(message);
-  }, 16);
 }
 
 function getProjectRuntimeStatus(project) {
@@ -542,45 +485,6 @@ function clearProjectFilters({ rerender = true } = {}) {
   if (rerender) renderList();
 }
 
-function formatClockTime(date = new Date()) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  }).format(date);
-}
-
-function setOperationStatus(type, label, detail = "") {
-  const statusType = ["idle", "running", "success", "error", "warn"].includes(type) ? type : "idle";
-  const statusLabel = String(label || "").trim() || "状态：空闲";
-  const statusDetail = String(detail || "").trim() || (
-    statusType === "idle" ? "最近动作：暂无" : `最近动作：${formatClockTime()} 更新`
-  );
-  const snapshot = `${statusType}|${statusLabel}|${statusDetail}`;
-  if (snapshot === lastOperationStatusSnapshot) return;
-  lastOperationStatusSnapshot = snapshot;
-
-  const terminalMessage = `${statusLabel} | ${statusDetail}`;
-  if (statusType === "success") {
-    termSuccess(terminalMessage);
-    return;
-  }
-  if (statusType === "error") {
-    termError(terminalMessage);
-    return;
-  }
-  if (statusType === "running") {
-    termCmd(terminalMessage);
-    return;
-  }
-  if (statusType === "warn") {
-    appendTerminal(terminalMessage, "warn");
-    return;
-  }
-  appendTerminal(terminalMessage, "hint");
-}
-
 function renderTodayInfo() {
   const todayInfo = byId("todayInfo");
   if (!todayInfo) return;
@@ -591,27 +495,6 @@ function renderTodayInfo() {
   }).format(new Date());
   const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
   todayInfo.textContent = `${dateText} · 端口 ${port}`;
-}
-
-function normalizeErrorMessage(message) {
-  if (!message) return "操作失败，请稍后重试。";
-  if (message.includes("Failed to fetch")) return "网络请求失败，请确认服务是否已启动。";
-  if (message.includes("Unexpected token")) return "接口返回异常，请检查服务日志。";
-  return message;
-}
-
-function showToast(message, type = "info", duration = 2600) {
-  if (!toastRegion) return;
-  const toast = document.createElement("div");
-  toast.className = `toast ${type}`;
-  toast.textContent = message;
-  const toasts = toastRegion.querySelectorAll(".toast");
-  if (toasts.length >= 4) {
-    toasts[0].remove();
-  }
-  toastRegion.appendChild(toast);
-  announce(message);
-  window.setTimeout(() => toast.remove(), duration);
 }
 
 async function openFolderByPath(rawPath) {
@@ -651,45 +534,6 @@ async function openAccessUrlExternally(rawUrl) {
     showToast(`打开失败：${normalizeErrorMessage(error.message)}`, "error");
     return false;
   }
-}
-
-async function api(url, options = {}) {
-  const init = {
-    method: "GET",
-    ...options,
-    headers: { ...(options.headers || {}) }
-  };
-
-  if (Object.prototype.hasOwnProperty.call(options, "body")) {
-    const body = options.body;
-    if (body instanceof FormData) {
-      init.body = body;
-      delete init.headers["Content-Type"];
-    } else if (typeof body === "string") {
-      init.body = body;
-      init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
-    } else {
-      init.body = JSON.stringify(body ?? {});
-      init.headers["Content-Type"] = "application/json";
-    }
-  }
-
-  const res = await fetch(url, init);
-  const raw = await res.text();
-  let data = {};
-
-  if (raw) {
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = { error: raw };
-    }
-  }
-
-  if (!res.ok) {
-    throw new Error(normalizeErrorMessage(data.error || `请求失败（${res.status}）`));
-  }
-  return data;
 }
 
 async function pickFolder(startDir = "") {
@@ -1149,52 +993,6 @@ function renderBackupSelectorWorkbench() {
   `;
 }
 
-function resetTerminal() {
-  clearTerminalWorkbench();
-  terminal.innerHTML = '<div class="terminal-line hint">等待操作...</div>';
-  terminalTitle.textContent = "操作终端";
-  setOperationStatus("idle", "状态：空闲");
-}
-
-function appendTerminal(text, type = "") {
-  const line = document.createElement("div");
-  line.className = `terminal-line ${type}`.trim();
-  line.textContent = text;
-  terminal.appendChild(line);
-  terminal.scrollTop = terminal.scrollHeight;
-}
-
-function termClear({ preserveWorkbench = false } = {}) {
-  terminal.innerHTML = "";
-  if (!preserveWorkbench) {
-    clearTerminalWorkbench();
-  }
-}
-
-function termLog(text) {
-  appendTerminal(text);
-}
-
-function termCmd(text) {
-  appendTerminal(text, "cmd");
-}
-
-function termSuccess(text) {
-  appendTerminal(text, "success");
-}
-
-function termError(text) {
-  appendTerminal(text, "error");
-}
-
-function termWarn(text) {
-  appendTerminal(text, "warn");
-}
-
-function termSeparator(label) {
-  appendTerminal(`=== ${label} ===`, "separator");
-}
-
 byId("btnClearTerminal").addEventListener("click", resetTerminal);
 
 if (terminalWorkbench) {
@@ -1235,185 +1033,6 @@ if (terminalWorkbench) {
     if (action === "delete-selected") {
       await deleteSelectedBackupsFromWorkbench();
     }
-  });
-}
-
-function runSSE(url, label) {
-  return new Promise((resolve, reject) => {
-    terminalTitle.textContent = label;
-    setOperationStatus("running", `状态：${label}进行中`, "最近动作：日志流已连接");
-    const source = new EventSource(url);
-    let settled = false;
-
-    const finish = (callback) => {
-      if (settled) return;
-      settled = true;
-      source.close();
-      callback();
-    };
-
-    source.onmessage = (event) => {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        termError("日志解析失败。");
-        return;
-      }
-
-      if (data.type === "log") {
-        if (String(data.text || "").startsWith("$ ")) termCmd(data.text);
-        else termLog(data.text);
-        return;
-      }
-
-      if (data.type === "done") {
-        termSuccess("操作完成。");
-        setOperationStatus("success", `状态：${label}完成`);
-        finish(() => resolve(data));
-        return;
-      }
-
-      if (data.type === "error") {
-        termError(data.text || "操作失败。");
-        setOperationStatus("error", `状态：${label}失败`);
-        finish(() => reject(new Error(data.text || "操作失败。")));
-      }
-    };
-
-    source.onerror = () => {
-      setOperationStatus("error", `状态：${label}中断`, "最近动作：日志连接中断");
-      finish(() => reject(new Error("日志连接中断，请重试。")));
-    };
-  });
-}
-
-async function runStreamingFetch(url, label, options = {}) {
-  terminalTitle.textContent = label;
-  setOperationStatus("running", `状态：${label}进行中`, "最近动作：日志流已连接");
-
-  const init = {
-    method: "POST",
-    headers: { ...(options.headers || {}) },
-    ...options
-  };
-
-  if (Object.prototype.hasOwnProperty.call(options, "body")) {
-    const body = options.body;
-    if (typeof body === "string") {
-      init.body = body;
-      init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
-    } else {
-      init.body = JSON.stringify(body ?? {});
-      init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json";
-    }
-  }
-
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    let message = `请求失败 (${response.status})`;
-    try {
-      const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("application/json")) {
-        const data = await response.json();
-        message = data?.error || message;
-      } else {
-        const text = await response.text();
-        if (text.trim()) message = text.trim();
-      }
-    } catch {}
-    setOperationStatus("error", `状态：${label}失败`);
-    throw new Error(message);
-  }
-
-  if (!response.body) {
-    setOperationStatus("error", `状态：${label}失败`);
-    throw new Error("日志流不可用，请重试。");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let streamResult = null;
-  let streamError = null;
-
-  const consumeEventBlock = (block) => {
-    const dataLines = block
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart());
-
-    if (!dataLines.length) return;
-
-    let data;
-    try {
-      data = JSON.parse(dataLines.join("\n"));
-    } catch {
-      termError("日志解析失败。");
-      return;
-    }
-
-    if (data.type === "log") {
-      if (String(data.text || "").startsWith("$ ")) termCmd(data.text);
-      else termLog(data.text);
-      return;
-    }
-
-    if (data.type === "done") {
-      termSuccess("操作完成。");
-      setOperationStatus("success", `状态：${label}完成`);
-      streamResult = data;
-      return;
-    }
-
-    if (data.type === "error") {
-      termError(data.text || "操作失败。");
-      setOperationStatus("error", `状态：${label}失败`);
-      streamError = new Error(data.text || "操作失败。");
-    }
-  };
-
-  try {
-    while (!streamResult && !streamError) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      let splitIndex = buffer.indexOf("\n\n");
-      while (splitIndex !== -1) {
-        const block = buffer.slice(0, splitIndex);
-        buffer = buffer.slice(splitIndex + 2);
-        consumeEventBlock(block);
-        if (streamResult || streamError) break;
-        splitIndex = buffer.indexOf("\n\n");
-      }
-    }
-  } finally {
-    try {
-      await reader.cancel();
-    } catch {}
-  }
-
-  if (!streamResult && !streamError && buffer.trim()) {
-    consumeEventBlock(buffer);
-  }
-
-  if (streamError) throw streamError;
-  if (streamResult) return streamResult;
-
-  setOperationStatus("error", `状态：${label}中断`, "最近动作：日志连接中断");
-  throw new Error("日志连接中断，请重试。");
-}
-
-function withButtonLoading(button, loadingText, task) {
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = loadingText;
-  button.setAttribute("aria-busy", "true");
-  return Promise.resolve(task()).finally(() => {
-    button.disabled = false;
-    button.textContent = original;
-    button.removeAttribute("aria-busy");
   });
 }
 
@@ -2157,7 +1776,7 @@ byId("projectList").addEventListener("click", async (event) => {
       termLog("分支校验通过，进入构建与打包阶段。");
       termSeparator(`开始打包 ${projectName}`);
       try {
-        await runSSE(`/api/pack/${projectId}`, `打包 ${projectName}`);
+        await runStreamingFetch(`/api/pack/${projectId}`, `打包 ${projectName}`);
         await loadProjects({ silent: true });
         showToast(`项目 ${projectName} 打包完成。`, "success");
       } catch (error) {
@@ -2193,7 +1812,7 @@ byId("projectList").addEventListener("click", async (event) => {
       termClear();
       termSeparator(`部署 ${projectName}`);
       try {
-        const result = await runSSE(`/api/deploy/${projectId}`, `部署 ${projectName}`);
+        const result = await runStreamingFetch(`/api/deploy/${projectId}`, `部署 ${projectName}`);
         if (result?.deployTime) {
           termSuccess(`部署时间：${result.deployTime}`);
         }

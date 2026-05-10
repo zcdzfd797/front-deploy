@@ -104,8 +104,8 @@ npm run tauri:build
 - `POST /api/parse-git`：解析本地 Git 信息
 - `GET /api/branch-check/:id`：分支一致性校验
 - `GET /api/git-sync-check/:id`：远程/本地提交一致性校验（打包前）
-- `GET /api/pack/:id`：打包（SSE）
-- `GET /api/deploy/:id`：部署（SSE）
+- `POST /api/pack/:id`：打包（SSE）
+- `POST /api/deploy/:id`：部署（SSE）
 - `POST /api/test-connection`：SSH 连接测试
 
 ## 目录结构

@@ -8,11 +8,32 @@ const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 
 const app = express();
-const HOST = process.env.HOST || '127.0.0.1';
+const REQUESTED_HOST = process.env.HOST || '127.0.0.1';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const HOST = LOOPBACK_HOSTS.has(REQUESTED_HOST) ? REQUESTED_HOST : '127.0.0.1';
 const PORT = Number(process.env.PORT) || 3000;
 const APP_INSTANCE_ID = process.env.APP_INSTANCE_ID || "";
 const DATA_FILE = path.join(__dirname, 'projects.json');
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'"
+].join('; ');
 
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -135,7 +156,7 @@ app.post('/api/parse-git', (req, res) => {
   try {
     const { dirPath } = req.body;
     if (!dirPath || !fs.existsSync(path.join(dirPath, '.git'))) {
-      return res.status(400).json({ error: '璺緞涓嶅瓨鍦ㄦ垨涓嶆槸Git浠撳簱' });
+      return res.status(400).json({ error: '路径不存在或不是 Git 仓库' });
     }
 
     const projectName = path.basename(dirPath);
@@ -448,7 +469,7 @@ function execRemoteCommand(conn, command, onLine) {
   });
 }
 
-app.get('/api/pack/:id', (req, res) => {
+app.post('/api/pack/:id', (req, res) => {
   const projects = loadProjects();
   const project = projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
@@ -582,7 +603,7 @@ app.get('/api/pack/:id', (req, res) => {
   });
 });
 
-app.get('/api/deploy/:id', (req, res) => {
+app.post('/api/deploy/:id', (req, res) => {
   const projects = loadProjects();
   const project = projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
@@ -942,6 +963,9 @@ app.post('/api/open-access-url', (req, res) => {
 const server = app.listen(PORT, HOST, () => {
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : PORT;
+  if (REQUESTED_HOST !== HOST) {
+    console.warn(`已忽略非本机监听地址 ${REQUESTED_HOST}，改用 ${HOST}`);
+  }
   console.log(`服务已启动: http://${HOST}:${actualPort}`);
 });
 

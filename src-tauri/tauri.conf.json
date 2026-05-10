@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' http://127.0.0.1:*; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http://127.0.0.1:*; font-src 'self'; connect-src 'self' http://127.0.0.1:*; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'"
     }
   },
   "bundle": {
