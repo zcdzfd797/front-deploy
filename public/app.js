@@ -1245,51 +1245,64 @@ async function refreshProjectGit(projectId, triggerButton) {
   const project = getProjectById(projectId);
   if (!project) {
     showToast("未找到项目，无法刷新。", "warn");
-    return;
+    return false;
   }
 
   const dirPath = normalizePath(project.dirPath);
   if (!dirPath) {
     showToast("项目路径为空，无法刷新 Git。", "warn");
-    return;
+    return false;
   }
 
   const runner = triggerButton
     ? (task) => withButtonLoading(triggerButton, "刷新中...", task)
     : (task) => Promise.resolve(task());
 
-  await runner(async () => {
+  return runner(async () => {
     try {
-      const data = await api("/api/parse-git", {
-        method: "POST",
-        body: { dirPath }
-      });
-
-      const update = {
-        projectName: String(data.projectName || project.projectName || "").trim() || project.projectName,
-        dirPath,
-        branch: String(data.branch || "").trim(),
-        commitHash: String(data.commitHash || "").trim(),
-        commitMsg: String(data.commitMsg || "").trim(),
-        commitTime: String(data.commitTime || "").trim(),
-        recentLogs: String(data.recentLogs || "")
-      };
-
-      const updated = await api(`/api/projects/${projectId}`, {
-        method: "PUT",
-        body: update
-      });
-
-      const index = projects.findIndex((item) => item.id === projectId);
-      if (index !== -1) projects[index] = updated;
-      renderList();
+      const updated = await syncProjectGitInfo(projectId, { render: true });
       setOperationStatus("success", "状态：Git已刷新");
       showToast(`项目 ${safeText(updated.projectName, project.projectName)} Git 已刷新。`, "success");
+      return true;
     } catch (error) {
       setOperationStatus("error", "状态：Git刷新失败");
       showToast(`刷新失败：${normalizeErrorMessage(error.message)}`, "error");
+      return false;
     }
   });
+}
+
+async function syncProjectGitInfo(projectId, { render = false } = {}) {
+  const project = getProjectById(projectId);
+  if (!project) throw new Error("未找到项目，无法刷新 Git。");
+
+  const dirPath = normalizePath(project.dirPath);
+  if (!dirPath) throw new Error("项目路径为空，无法刷新 Git。");
+
+  const data = await api("/api/parse-git", {
+    method: "POST",
+    body: { dirPath }
+  });
+
+  const update = {
+    projectName: String(data.projectName || project.projectName || "").trim() || project.projectName,
+    dirPath,
+    branch: String(data.branch || "").trim(),
+    commitHash: String(data.commitHash || "").trim(),
+    commitMsg: String(data.commitMsg || "").trim(),
+    commitTime: String(data.commitTime || "").trim(),
+    recentLogs: String(data.recentLogs || "")
+  };
+
+  const updated = await api(`/api/projects/${projectId}`, {
+    method: "PUT",
+    body: update
+  });
+
+  const index = projects.findIndex((item) => item.id === projectId);
+  if (index !== -1) projects[index] = updated;
+  if (render) renderList();
+  return updated;
 }
 
 function buildConnPayloadFromProject(project) {
@@ -1766,6 +1779,22 @@ byId("projectList").addEventListener("click", async (event) => {
 
   if (button.classList.contains("btn-pack")) {
     await withButtonLoading(button, "打包中...", async () => {
+      termClear();
+      termSeparator(`打包前刷新 Git ${projectName}`);
+      termCmd("开始刷新本地 Git 信息...");
+      setOperationStatus("running", "状态：打包前Git刷新中", "最近动作：正在读取本地 Git 信息");
+      try {
+        const updated = await syncProjectGitInfo(projectId);
+        termSuccess(`Git 信息已刷新：${safeText(updated.branch, "-")} ${safeText(updated.commitHash, "-")}`);
+        setOperationStatus("success", "状态：打包前Git已刷新");
+      } catch (error) {
+        const message = normalizeErrorMessage(error.message);
+        termError(`Git 刷新失败：${message}`);
+        setOperationStatus("error", "状态：打包前Git刷新失败");
+        showToast(`打包前 Git 刷新失败：${message}`, "error", 3600);
+        return;
+      }
+
       const gitReady = await checkRemoteAndLocalGitBeforePack(projectId, projectName);
       if (!gitReady) return;
 
