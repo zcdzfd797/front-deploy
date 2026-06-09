@@ -873,12 +873,15 @@ function askConfirm({
   title = "请确认操作",
   message = "确认继续当前操作吗？",
   confirmText = "确认",
+  extraText = "",
+  extraValue = "extra",
   tone = "primary"
 } = {}) {
   const modal = byId("confirmModal");
   const titleEl = byId("confirmModalTitle");
   const messageEl = byId("confirmModalMessage");
   const confirmBtn = byId("btnConfirmOk");
+  const extraBtn = byId("btnConfirmExtra");
 
   if (!modal || !titleEl || !messageEl || !confirmBtn) {
     return Promise.resolve(window.confirm(message));
@@ -887,6 +890,11 @@ function askConfirm({
   titleEl.textContent = title;
   messageEl.textContent = message;
   confirmBtn.textContent = confirmText;
+  if (extraBtn) {
+    extraBtn.textContent = extraText || "";
+    extraBtn.hidden = !extraText;
+    extraBtn.dataset.confirmValue = String(extraValue);
+  }
   confirmBtn.classList.remove("btn-primary", "btn-danger", "btn-warn");
   if (tone === "danger") confirmBtn.classList.add("btn-danger");
   else if (tone === "warn") confirmBtn.classList.add("btn-warn");
@@ -949,11 +957,15 @@ window.addEventListener("resize", () => {
 
 const btnConfirmCancel = byId("btnConfirmCancel");
 const btnConfirmOk = byId("btnConfirmOk");
+const btnConfirmExtra = byId("btnConfirmExtra");
 if (btnConfirmCancel) {
   btnConfirmCancel.addEventListener("click", () => settleConfirm(false));
 }
 if (btnConfirmOk) {
   btnConfirmOk.addEventListener("click", () => settleConfirm(true));
+}
+if (btnConfirmExtra) {
+  btnConfirmExtra.addEventListener("click", () => settleConfirm(btnConfirmExtra.dataset.confirmValue || "extra"));
 }
 
 function clearTerminalWorkbench() {
@@ -1136,6 +1148,69 @@ async function checkRemoteAndLocalGitBeforePack(projectId, projectName) {
     setOperationStatus("error", "状态：打包前Git校验失败");
     showToast(`打包前 Git 校验失败：${message}`, "error", 3600);
     return false;
+  }
+}
+
+function formatGitChangeSummary(entries = []) {
+  const items = Array.isArray(entries) ? entries : [];
+  return items
+    .slice(0, 6)
+    .map((item) => `${safeText(item.code, "??")} ${safeText(item.path || item.raw, "")}`.trim())
+    .filter(Boolean)
+    .join("；");
+}
+
+async function choosePackGitDirtyStrategy(projectId, projectName) {
+  const safeProjectName = safeText(projectName, "当前项目");
+  termCmd("开始检查工作区未提交代码...");
+  setOperationStatus("running", "状态：打包前工作区检查中", "最近动作：正在检查未提交代码");
+
+  try {
+    const status = await api(`/api/git-worktree-status/${projectId}`);
+    const count = Number(status.count || 0);
+    const entries = Array.isArray(status.entries) ? status.entries : [];
+
+    if (!status.hasChanges) {
+      termSuccess("工作区干净，继续打包。");
+      setOperationStatus("success", "状态：工作区检查通过");
+      return { proceed: true, autoStash: false };
+    }
+
+    const summary = formatGitChangeSummary(entries);
+    termWarn(`检测到 ${count} 项未提交代码。`);
+    if (summary) termWarn(`变更摘要：${summary}${count > 6 ? "；..." : ""}`);
+    termWarn("可选择先添加储藏，打包完成后自动还原。");
+    setOperationStatus("warn", "状态：存在未提交代码", `最近动作：检测到 ${count} 项变更`);
+
+    const choice = await askConfirm({
+      title: "存在未提交代码",
+      message: `项目“${safeProjectName}”存在 ${count} 项未提交代码。建议先添加储藏，打包完成后自动还原，避免未提交内容进入构建产物。`,
+      confirmText: "继续打包",
+      extraText: "储藏后打包",
+      extraValue: "stash",
+      tone: "warn"
+    });
+
+    if (choice === "stash") {
+      termSuccess("用户选择：添加储藏，打包完成后还原。");
+      return { proceed: true, autoStash: true };
+    }
+
+    if (choice) {
+      termWarn("用户选择：继续打包，未提交代码会参与本次构建。");
+      return { proceed: true, autoStash: false };
+    }
+
+    termWarn("用户选择：取消打包。");
+    setOperationStatus("idle", "状态：已取消打包");
+    showToast("已取消打包。", "info", 1800);
+    return { proceed: false, autoStash: false };
+  } catch (error) {
+    const message = normalizeErrorMessage(error.message);
+    termError(`工作区检查失败：${message}`);
+    setOperationStatus("error", "状态：工作区检查失败");
+    showToast(`打包前工作区检查失败：${message}`, "error", 3600);
+    return { proceed: false, autoStash: false };
   }
 }
 
@@ -1815,6 +1890,9 @@ byId("projectList").addEventListener("click", async (event) => {
       const gitReady = await checkRemoteAndLocalGitBeforePack(projectId, projectName);
       if (!gitReady) return;
 
+      const dirtyStrategy = await choosePackGitDirtyStrategy(projectId, projectName);
+      if (!dirtyStrategy.proceed) return;
+
       termCmd("开始执行分支校验...");
       const allowed = await validateBranchBeforeAction(projectId, projectName, "打包", { resetTerminal: false });
       if (!allowed) return;
@@ -1822,7 +1900,9 @@ byId("projectList").addEventListener("click", async (event) => {
       termLog("分支校验通过，进入构建与打包阶段。");
       termSeparator(`开始打包 ${projectName}`);
       try {
-        await runStreamingFetch(`/api/pack/${projectId}`, `打包 ${projectName}`);
+        await runStreamingFetch(`/api/pack/${projectId}`, `打包 ${projectName}`, {
+          body: { autoStash: dirtyStrategy.autoStash }
+        });
         await loadProjects({ silent: true });
         showToast(`项目 ${projectName} 打包完成。`, "success");
       } catch (error) {

@@ -14,6 +14,10 @@ const HOST = LOOPBACK_HOSTS.has(REQUESTED_HOST) ? REQUESTED_HOST : '127.0.0.1';
 const PORT = Number(process.env.PORT) || 3000;
 const APP_INSTANCE_ID = process.env.APP_INSTANCE_ID || "";
 const DATA_FILE = path.join(__dirname, 'projects.json');
+const BUILD_OUTPUT_DIRS = [
+  'dist', 'build', 'out', 'release', 'output', 'www', 'web-build',
+  '.output', '.next', '.nuxt', 'storybook-static'
+];
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self'",
@@ -103,7 +107,8 @@ function runGitCommand(dirPath, args) {
   const result = spawnSync('git', args, {
     cwd: dirPath,
     encoding: 'utf-8',
-    shell: false
+    shell: false,
+    maxBuffer: 10 * 1024 * 1024
   });
 
   if (result.error) {
@@ -116,14 +121,241 @@ function runGitCommand(dirPath, args) {
   return String(result.stdout || '').trim();
 }
 
-function getGitSyncInfo(project) {
-  const dirPath = project?.dirPath;
+function ensureGitProjectDir(dirPath) {
   if (!dirPath || !fs.existsSync(dirPath)) {
     throw new Error('项目路径不存在');
   }
   if (!fs.existsSync(path.join(dirPath, '.git'))) {
     throw new Error('项目路径不是 Git 仓库');
   }
+}
+
+function parseGitStatusLine(line) {
+  const raw = String(line || '');
+  return {
+    code: raw.slice(0, 2).trim() || '??',
+    path: raw.slice(3).trim(),
+    raw
+  };
+}
+
+function toGitRelativePath(baseDir, targetPath) {
+  const relativePath = path.relative(baseDir, targetPath);
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return '';
+  }
+  return relativePath.replace(/\\/g, '/');
+}
+
+function getKnownPackZipPaths(project) {
+  const dirPath = project?.dirPath;
+  const names = new Set();
+
+  const zipPath = String(project?.zipPath || '').trim();
+  if (dirPath && zipPath) {
+    const relativeZipPath = toGitRelativePath(dirPath, zipPath);
+    if (relativeZipPath) names.add(relativeZipPath);
+  }
+
+  const zipName = String(project?.zipName || '').trim();
+  if (zipName && !zipName.includes('/') && !zipName.includes('\\')) {
+    names.add(zipName);
+  }
+
+  const packDirName = String(project?.packDirName || '').trim();
+  if (packDirName && !packDirName.includes('/') && !packDirName.includes('\\')) {
+    names.add(`${packDirName}.zip`);
+  }
+
+  return names;
+}
+
+function normalizeGitPath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\.\/+/, '');
+}
+
+function normalizeGitPathSet(items = []) {
+  return new Set(Array.from(items).map(normalizeGitPath).filter(Boolean));
+}
+
+function normalizeGitTopLevelDirSet(items = []) {
+  return new Set(Array.from(items).map((item) => normalizeGitPath(item).toLowerCase()).filter(Boolean));
+}
+
+function isIgnoredUntrackedGitPath(entryPath, ignoredPaths = new Set(), ignoredTopLevelDirs = new Set()) {
+  const normalizedPath = normalizeGitPath(entryPath);
+  if (!normalizedPath) return false;
+  if (ignoredPaths.has(normalizedPath)) return true;
+
+  const topLevelName = normalizedPath.split('/')[0].toLowerCase();
+  return ignoredTopLevelDirs.has(topLevelName);
+}
+
+function listGitWorktreeEntries(dirPath) {
+  ensureGitProjectDir(dirPath);
+  const output = runGitCommand(dirPath, ['status', '--porcelain=v1', '-uall']);
+  return output
+    ? output.split(/\r?\n/).filter(Boolean).map(parseGitStatusLine)
+    : [];
+}
+
+function filterGitWorktreeEntries(entries, options = {}) {
+  const ignoredUntrackedPaths = options.ignoredUntrackedPaths instanceof Set
+    ? normalizeGitPathSet(options.ignoredUntrackedPaths)
+    : normalizeGitPathSet(options.ignoredUntrackedPaths || []);
+  const ignoredUntrackedTopLevelDirs = options.ignoredUntrackedTopLevelDirs instanceof Set
+    ? normalizeGitTopLevelDirSet(options.ignoredUntrackedTopLevelDirs)
+    : normalizeGitTopLevelDirSet(options.ignoredUntrackedTopLevelDirs || []);
+  return entries.filter((entry) => !(
+    entry.code === '??'
+    && isIgnoredUntrackedGitPath(entry.path, ignoredUntrackedPaths, ignoredUntrackedTopLevelDirs)
+  ));
+}
+
+function buildGitWorktreeStatus(entries) {
+  return {
+    hasChanges: entries.length > 0,
+    count: entries.length,
+    entries
+  };
+}
+
+function getGitWorktreeStatus(dirPath, options = {}) {
+  return buildGitWorktreeStatus(filterGitWorktreeEntries(listGitWorktreeEntries(dirPath), options));
+}
+
+function getIgnoredUntrackedPaths(entries, ignoredPaths = new Set()) {
+  const normalizedIgnoredPaths = normalizeGitPathSet(ignoredPaths);
+  return new Set(entries
+    .filter((entry) => entry.code === '??' && normalizedIgnoredPaths.has(normalizeGitPath(entry.path)))
+    .map((entry) => normalizeGitPath(entry.path)));
+}
+
+function getIgnoredUntrackedTopLevelDirs(entries, ignoredTopLevelDirs = new Set()) {
+  const normalizedIgnoredDirs = normalizeGitTopLevelDirSet(ignoredTopLevelDirs);
+  const trackedTopLevelDirs = new Set(entries
+    .filter((entry) => entry.code !== '??')
+    .map((entry) => normalizeGitPath(entry.path).split('/')[0].toLowerCase())
+    .filter(Boolean));
+
+  return new Set(entries
+    .filter((entry) => entry.code === '??')
+    .map((entry) => normalizeGitPath(entry.path).split('/')[0].toLowerCase())
+    .filter((topLevelName) => (
+      topLevelName
+      && normalizedIgnoredDirs.has(topLevelName)
+      && !trackedTopLevelDirs.has(topLevelName)
+    )));
+}
+
+function listGitStashes(dirPath) {
+  ensureGitProjectDir(dirPath);
+  const output = runGitCommand(dirPath, ['stash', 'list', '--format=%gd%x09%H%x09%s']);
+  if (!output) return [];
+  return output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [ref = '', hash = '', ...subjectParts] = line.split('\t');
+    return {
+      ref: ref.trim(),
+      hash: hash.trim(),
+      subject: subjectParts.join('\t').trim()
+    };
+  });
+}
+
+function findGitStashByToken(dirPath, token, fallbackHash = '') {
+  const stashes = listGitStashes(dirPath);
+  return stashes.find((item) => item.subject.includes(token))
+    || stashes.find((item) => fallbackHash && item.hash === fallbackHash)
+    || null;
+}
+
+function shouldRetryStashApplyWithoutIndex(message) {
+  return /Try without --index|conflicts in index|Index was not unstashed/i.test(String(message || ''));
+}
+
+function buildPackStashPushArgs(message, excludedPaths = new Set(), excludedTopLevelDirs = new Set()) {
+  const args = ['stash', 'push', '-u', '-m', message];
+  const paths = [
+    ...Array.from(excludedPaths).filter(Boolean),
+    ...Array.from(excludedTopLevelDirs).filter(Boolean).map((item) => `${item}/**`)
+  ];
+  if (paths.length) {
+    args.push('--', '.', ...paths.map((item) => `:(exclude)${item}`));
+  }
+  return args;
+}
+
+function createPackGitStash(project) {
+  const dirPath = project?.dirPath;
+  const knownPackZipPaths = getKnownPackZipPaths(project);
+  const buildOutputDirs = new Set(BUILD_OUTPUT_DIRS);
+  const rawEntries = listGitWorktreeEntries(dirPath);
+  const status = buildGitWorktreeStatus(filterGitWorktreeEntries(rawEntries, {
+    ignoredUntrackedPaths: knownPackZipPaths,
+    ignoredUntrackedTopLevelDirs: buildOutputDirs
+  }));
+  const token = `front-deploy-pack-${Date.now()}-${uuidv4().slice(0, 8)}`;
+  const projectName = project?.projectName;
+  const safeProjectName = String(projectName || path.basename(dirPath) || 'project').trim();
+  const message = `front-deploy auto stash before pack ${safeProjectName} ${token}`;
+
+  if (!status.hasChanges) {
+    return { created: false, token, message, status };
+  }
+
+  const output = runGitCommand(dirPath, buildPackStashPushArgs(
+    message,
+    getIgnoredUntrackedPaths(rawEntries, knownPackZipPaths),
+    getIgnoredUntrackedTopLevelDirs(rawEntries, buildOutputDirs)
+  ));
+  const stash = findGitStashByToken(dirPath, token);
+  if (!stash) {
+    throw new Error('已执行 git stash，但未能定位本次创建的储藏记录');
+  }
+
+  return {
+    created: true,
+    token,
+    message,
+    status,
+    output,
+    ref: stash.ref,
+    hash: stash.hash,
+    subject: stash.subject
+  };
+}
+
+function restorePackGitStash(dirPath, stashState) {
+  if (!stashState?.created) return { restored: false };
+
+  const stash = findGitStashByToken(dirPath, stashState.token, stashState.hash);
+  if (!stash?.ref) {
+    throw new Error('未找到需要还原的储藏记录，请手动检查 git stash list');
+  }
+
+  let restoreMode = 'index';
+  try {
+    runGitCommand(dirPath, ['stash', 'apply', '--index', stash.ref]);
+  } catch (err) {
+    if (!shouldRetryStashApplyWithoutIndex(err.message)) {
+      throw err;
+    }
+    runGitCommand(dirPath, ['stash', 'apply', stash.ref]);
+    restoreMode = 'worktree';
+  }
+  runGitCommand(dirPath, ['stash', 'drop', stash.ref]);
+  return {
+    restored: true,
+    restoreMode,
+    ref: stash.ref,
+    hash: stash.hash,
+    subject: stash.subject
+  };
+}
+
+function getGitSyncInfo(project) {
+  const dirPath = project?.dirPath;
+  ensureGitProjectDir(dirPath);
 
   const localBranch = runGitCommand(dirPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const localHash = runGitCommand(dirPath, ['rev-parse', 'HEAD']);
@@ -366,6 +598,22 @@ app.get('/api/git-sync-check/:id', (req, res) => {
   }
 });
 
+app.get('/api/git-worktree-status/:id', (req, res) => {
+  try {
+    const projects = loadProjects();
+    const project = projects.find(p => p.id === req.params.id);
+    if (!project) return res.status(404).json({ error: '项目不存在' });
+
+    const status = getGitWorktreeStatus(project.dirPath, {
+      ignoredUntrackedPaths: getKnownPackZipPaths(project),
+      ignoredUntrackedTopLevelDirs: new Set(BUILD_OUTPUT_DIRS)
+    });
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: `Git 工作区检查失败: ${err.message}` });
+  }
+});
+
 function buildSshConnConfig(deploy) {
   const connConfig = { host: deploy.host, port: deploy.port || 22, username: deploy.username };
   if (deploy.privateKey) connConfig.privateKey = deploy.privateKey;
@@ -474,6 +722,8 @@ app.post('/api/pack/:id', (req, res) => {
   const project = projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
   if (!project.dirPath || !fs.existsSync(project.dirPath)) return res.status(400).json({ error: '项目路径不存在' });
+  const packOptions = req.body && typeof req.body === 'object' ? req.body : {};
+  const useAutoStash = Boolean(packOptions.autoStash);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -496,9 +746,47 @@ app.post('/api/pack/:id', (req, res) => {
     fs.removeSync(project.zipPath);
   }
 
+  let stashState = null;
+  if (useAutoStash) {
+    try {
+      send('log', { text: '检测到用户选择自动储藏，正在保存未提交代码...' });
+      stashState = createPackGitStash(project);
+      if (stashState.created) {
+        send('log', { text: `已创建临时储藏: ${stashState.ref}（${stashState.status.count} 项变更）` });
+      } else {
+        send('log', { text: '当前工作区已无未提交代码，无需创建储藏。' });
+      }
+    } catch (err) {
+      send('error', { text: `创建 Git 储藏失败: ${err.message}` });
+      return res.end();
+    }
+  }
+
+  let ended = false;
+  const finishPack = (type, data) => {
+    if (ended) return;
+    ended = true;
+
+    if (stashState?.created) {
+      try {
+        const restored = restorePackGitStash(project.dirPath, stashState);
+        if (restored.restored) {
+          send('log', { text: `已还原临时储藏: ${restored.ref}` });
+        }
+      } catch (err) {
+        send('error', {
+          text: `打包流程结束，但自动还原储藏失败: ${err.message}`
+        });
+        return res.end();
+      }
+    }
+
+    send(type, data);
+    res.end();
+  };
+
   send('log', { text: `$ ${buildCmd}` });
-  const parts = buildCmd.split(' ');
-  const child = spawn(parts[0], parts.slice(1), { cwd: project.dirPath, shell: true });
+  const child = spawn(buildCmd, { cwd: project.dirPath, shell: true });
 
   child.stdout.on('data', (data) => {
     data.toString().split('\n').filter(Boolean).forEach(line => send('log', { text: line }));
@@ -509,15 +797,15 @@ app.post('/api/pack/:id', (req, res) => {
 
   child.on('close', async (code) => {
     if (code !== 0) {
-      send('error', { text: `构建失败 (exit code ${code})` });
-      return res.end();
+      finishPack('error', { text: `构建失败 (exit code ${code})` });
+      return;
     }
 
     send('log', { text: '构建完成，检测输出目录...' });
 
     const startTime = Date.now() - 3600000;
     const ignoreDirs = new Set(['node_modules', '.git', '.vscode', '.idea']);
-    const preferredOutputDirs = ['dist', 'build', 'out', 'release', 'output', 'www', 'web-build', '.output', '.next', '.nuxt', 'storybook-static'];
+    const preferredOutputDirs = BUILD_OUTPUT_DIRS;
     const nonOutputLikelyDirs = new Set(['src', 'public', 'docs', 'doc', 'scripts', 'script', 'config', 'configs', 'test', 'tests', '__tests__', 'coverage']);
 
     const dirEntries = fs.readdirSync(project.dirPath)
@@ -560,8 +848,8 @@ app.post('/api/pack/:id', (req, res) => {
     }
 
     if (!pickedDir) {
-      send('error', { text: '未检测到可打包的构建输出目录' });
-      return res.end();
+      finishPack('error', { text: '未检测到可打包的构建输出目录' });
+      return;
     }
 
     const packDir = pickedDir.absPath;
@@ -595,11 +883,10 @@ app.post('/api/pack/:id', (req, res) => {
       saveProjects(projects);
 
       send('log', { text: `打包完成: ${zipName} (${(stat.size / 1024 / 1024).toFixed(2)} MB)` });
-      send('done', { success: true });
+      finishPack('done', { success: true });
     } catch (err) {
-      send('error', { text: '打包失败: ' + err.message });
+      finishPack('error', { text: '打包失败: ' + err.message });
     }
-    res.end();
   });
 });
 
