@@ -478,6 +478,16 @@ function updateProjectFilterResult(totalInGroup, visibleCount) {
   result.textContent = `显示 ${visibleCount} / ${totalInGroup} 项`;
 }
 
+function updateConsoleSummary({ total, visible, groupName }) {
+  const totalEl = byId("summaryProjectCount");
+  const visibleEl = byId("summaryVisibleCount");
+  const groupEl = byId("summaryGroupName");
+
+  if (totalEl) totalEl.textContent = String(total);
+  if (visibleEl) visibleEl.textContent = String(visible);
+  if (groupEl) groupEl.textContent = groupName || "全部";
+}
+
 function clearProjectFilters({ rerender = true } = {}) {
   projectSearchKeyword = "";
   projectDeployFilter = "all";
@@ -559,6 +569,7 @@ function renderList() {
 
   if (!projects.length) {
     updateProjectFilterResult(0, 0);
+    updateConsoleSummary({ total: 0, visible: 0, groupName: currentGroupLabel });
     empty.innerHTML = "<p>暂无项目，点击右上角“添加项目”开始。</p>";
     empty.style.display = "";
     list.innerHTML = "";
@@ -568,6 +579,7 @@ function renderList() {
   const groupedProjects = getFilteredProjects();
   if (!groupedProjects.length) {
     updateProjectFilterResult(0, 0);
+    updateConsoleSummary({ total: projects.length, visible: 0, groupName: currentGroupLabel });
     empty.innerHTML = `<p>“${escapeHtml(currentGroupLabel)}”暂时没有项目，请切换分组或新增项目。</p>`;
     empty.style.display = "";
     list.innerHTML = "";
@@ -576,6 +588,11 @@ function renderList() {
 
   const visibleProjects = applyProjectViewFilters(groupedProjects);
   updateProjectFilterResult(groupedProjects.length, visibleProjects.length);
+  updateConsoleSummary({
+    total: projects.length,
+    visible: visibleProjects.length,
+    groupName: currentGroupLabel
+  });
 
   if (!visibleProjects.length) {
     const hasFilter = Boolean(projectSearchKeyword.trim()) || projectDeployFilter !== "all";

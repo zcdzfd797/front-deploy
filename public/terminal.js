@@ -50,10 +50,19 @@ function resetTerminal() {
   setOperationStatus("idle", "状态：空闲");
 }
 
+function cleanTerminalText(text) {
+  return String(text ?? "")
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "")
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x9B[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1B[@-Z\\-_]/g, "")
+    .replace(/\r/g, "");
+}
+
 function appendTerminal(text, type = "") {
   const line = document.createElement("div");
   line.className = `terminal-line ${type}`.trim();
-  line.textContent = text;
+  line.textContent = cleanTerminalText(text);
   terminal.appendChild(line);
   terminal.scrollTop = terminal.scrollHeight;
 }
