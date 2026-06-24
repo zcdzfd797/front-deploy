@@ -32,6 +32,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -1597,13 +1601,17 @@ body::before {
   gap: 1px;
 }
 
+.brand-copy h1,
 .brand-copy strong {
+  margin: 0;
   color: var(--paper-ink);
   font-size: 18px;
   font-weight: 800;
   line-height: 1.1;
+  text-wrap: balance;
 }
 
+.brand-copy h1::first-letter,
 .brand-copy strong::first-letter {
   color: var(--brand);
 }
@@ -2826,6 +2834,7 @@ select:focus-visible,
     overflow-wrap: anywhere;
   }
 
+  .brand-copy h1,
   .brand-copy strong {
     font-size: 16px;
   }
@@ -2894,6 +2903,7 @@ body {
   font-size: 17px;
 }
 
+.brand-copy h1,
 .brand-copy strong {
   font-size: 21px;
 }
@@ -3000,6 +3010,7 @@ textarea {
     font-size: 16px;
   }
 
+  .brand-copy h1,
   .brand-copy strong,
   .mission-title,
   .terminal-title,
@@ -3085,5 +3096,83 @@ textarea {
 
   .terminal-deck.right-panel .terminal {
     min-height: 320px;
+  }
+}
+
+/* Review fixes: keep the sketch style while tightening interaction and scanability. */
+html {
+  overflow-x: hidden;
+}
+
+body {
+  touch-action: manipulation;
+}
+
+.modal-overlay,
+.modal-body,
+.terminal,
+.project-list,
+.group-list,
+.terminal-workbench {
+  overscroll-behavior: contain;
+}
+
+.brand-time,
+.project-filter-result,
+.group-item-count,
+.summary-kicker,
+.console-summary strong,
+.terminal-line,
+.terminal-workbench-count,
+.commit-hash,
+.project-state-pill {
+  font-variant-numeric: tabular-nums;
+}
+
+.mission-title,
+.terminal-title,
+.modal-header h2,
+.empty-state p {
+  text-wrap: balance;
+}
+
+.empty-state p,
+.terminal-line,
+.toast,
+.confirm-message,
+.info-item,
+.card-meta,
+.card-deploy-info {
+  overflow-wrap: anywhere;
+}
+
+.btn,
+.btn-close,
+.tab-btn,
+.group-item {
+  touch-action: manipulation;
+}
+
+@media (max-width: 620px) {
+  .modal {
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  }
+
+  .modal-body {
+    overflow: auto;
+  }
+
+  .modal-footer {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .modal-footer .btn {
+    width: 100%;
+  }
+
+  .empty-state p {
+    margin: 0;
   }
 }

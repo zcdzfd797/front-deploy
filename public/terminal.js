@@ -45,7 +45,7 @@ function setOperationStatus(type, label, detail = "") {
 
 function resetTerminal() {
   clearTerminalWorkbench();
-  terminal.innerHTML = '<div class="terminal-line hint">等待操作...</div>';
+  terminal.innerHTML = '<div class="terminal-line hint">等待操作…</div>';
   terminalTitle.textContent = "操作终端";
   setOperationStatus("idle", "状态：空闲");
 }

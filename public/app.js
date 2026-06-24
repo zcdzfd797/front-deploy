@@ -363,7 +363,7 @@ function renderRecentDirOptions() {
     const select = byId(id);
     if (!select) return;
     const current = select.value;
-    const baseOption = '<option value="">最近使用路径...</option>';
+    const baseOption = '<option value="">最近使用路径…</option>';
     const options = dirs
       .map((dir) => `<option value="${escapeHtml(dir)}">${escapeHtml(dir)}</option>`)
       .join("");
@@ -570,7 +570,7 @@ function renderList() {
   if (!projects.length) {
     updateProjectFilterResult(0, 0);
     updateConsoleSummary({ total: 0, visible: 0, groupName: currentGroupLabel });
-    empty.innerHTML = "<p>暂无项目，点击右上角“添加项目”开始。</p>";
+    empty.innerHTML = "<p>暂无项目，点击“添加项目”开始。</p>";
     empty.style.display = "";
     list.innerHTML = "";
     return;
@@ -598,7 +598,7 @@ function renderList() {
     const hasFilter = Boolean(projectSearchKeyword.trim()) || projectDeployFilter !== "all";
     empty.innerHTML = hasFilter
       ? `<p>当前筛选条件下没有匹配项目。</p><button class="btn btn-secondary btn-sm btn-reset-inline" type="button" data-action="reset-filters">清空筛选</button>`
-      : "<p>暂无项目，点击右上角“添加项目”开始。</p>";
+      : "<p>暂无项目，点击“添加项目”开始。</p>";
     empty.style.display = "";
     list.innerHTML = "";
     return;
@@ -1095,7 +1095,7 @@ async function checkRemoteAndLocalGitBeforePack(projectId, projectName) {
   const safeProjectName = safeText(projectName, "当前项目");
   termClear();
   termSeparator(`打包前Git校验 ${safeProjectName}`);
-  termCmd("开始读取远程与本地 Git 信息...");
+  termCmd("开始读取远程与本地 Git 信息…");
   setOperationStatus("running", "状态：打包前Git校验中", "最近动作：正在读取远程与本地提交");
 
   try {
@@ -1162,7 +1162,7 @@ function formatGitChangeSummary(entries = []) {
 
 async function choosePackGitDirtyStrategy(projectId, projectName) {
   const safeProjectName = safeText(projectName, "当前项目");
-  termCmd("开始检查工作区未提交代码...");
+  termCmd("开始检查工作区未提交代码…");
   setOperationStatus("running", "状态：打包前工作区检查中", "最近动作：正在检查未提交代码");
 
   try {
@@ -1178,7 +1178,7 @@ async function choosePackGitDirtyStrategy(projectId, projectName) {
 
     const summary = formatGitChangeSummary(entries);
     termWarn(`检测到 ${count} 项未提交代码。`);
-    if (summary) termWarn(`变更摘要：${summary}${count > 6 ? "；..." : ""}`);
+    if (summary) termWarn(`变更摘要：${summary}${count > 6 ? "；…" : ""}`);
     termWarn("可选择先添加储藏，打包完成后自动还原。");
     setOperationStatus("warn", "状态：存在未提交代码", `最近动作：检测到 ${count} 项变更`);
 
@@ -1347,7 +1347,7 @@ async function refreshProjectGit(projectId, triggerButton) {
   }
 
   const runner = triggerButton
-    ? (task) => withButtonLoading(triggerButton, "刷新中...", task)
+    ? (task) => withButtonLoading(triggerButton, "刷新中…", task)
     : (task) => Promise.resolve(task());
 
   return runner(async () => {
@@ -1450,7 +1450,7 @@ async function testProjectConnection(projectId, triggerButton) {
   }
 
   const runner = triggerButton
-    ? (task) => withButtonLoading(triggerButton, "测试中...", task)
+    ? (task) => withButtonLoading(triggerButton, "测试中…", task)
     : (task) => Promise.resolve(task());
 
   await runner(async () => {
@@ -1492,7 +1492,7 @@ async function openBackupSelector(projectId, triggerButton) {
   const projectName = safeText(project.projectName, "当前项目");
   const backupRootPath = getBackupRootPath(project);
   const runner = triggerButton
-    ? (task) => withButtonLoading(triggerButton, "读取中...", task)
+    ? (task) => withButtonLoading(triggerButton, "读取中…", task)
     : (task) => Promise.resolve(task());
 
   await runner(async () => {
@@ -1560,7 +1560,7 @@ async function deleteSelectedBackupsFromWorkbench() {
   try {
     termClear({ preserveWorkbench: true });
     termSeparator(`删除备份 ${backupSelectorState.projectName}`);
-    termCmd(`准备删除 ${selectedDirectories.length} 个备份目录...`);
+    termCmd(`准备删除 ${selectedDirectories.length} 个备份目录…`);
 
     const result = await runStreamingFetch(
       `/api/delete-backups/${backupSelectorState.projectId}`,
@@ -1870,10 +1870,10 @@ byId("projectList").addEventListener("click", async (event) => {
   }
 
   if (button.classList.contains("btn-pack")) {
-    await withButtonLoading(button, "打包中...", async () => {
+    await withButtonLoading(button, "打包中…", async () => {
       termClear();
       termSeparator(`打包前刷新 Git ${projectName}`);
-      termCmd("开始刷新本地 Git 信息...");
+      termCmd("开始刷新本地 Git 信息…");
       setOperationStatus("running", "状态：打包前Git刷新中", "最近动作：正在读取本地 Git 信息");
       try {
         const updated = await syncProjectGitInfo(projectId);
@@ -1893,7 +1893,7 @@ byId("projectList").addEventListener("click", async (event) => {
       const dirtyStrategy = await choosePackGitDirtyStrategy(projectId, projectName);
       if (!dirtyStrategy.proceed) return;
 
-      termCmd("开始执行分支校验...");
+      termCmd("开始执行分支校验…");
       const allowed = await validateBranchBeforeAction(projectId, projectName, "打包", { resetTerminal: false });
       if (!allowed) return;
 
@@ -1934,7 +1934,7 @@ byId("projectList").addEventListener("click", async (event) => {
     });
     if (!confirmed) return;
 
-    await withButtonLoading(button, "部署中...", async () => {
+    await withButtonLoading(button, "部署中…", async () => {
       termClear();
       termSeparator(`部署 ${projectName}`);
       try {

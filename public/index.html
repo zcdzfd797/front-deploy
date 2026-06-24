@@ -16,7 +16,7 @@
         <div class="brand-box">
           <span class="brand-mark" aria-hidden="true">FD</span>
           <div class="brand-copy">
-            <strong>Front Deploy</strong>
+            <h1>Front Deploy</h1>
             <span>部署控制台</span>
           </div>
         </div>
@@ -33,6 +33,8 @@
               <input
                 type="text"
                 id="inputNewGroupName"
+                name="groupNameDraft"
+                aria-label="新建分组"
                 placeholder="新建分组，回车确认"
                 autocomplete="off"
                 maxlength="30"
@@ -51,10 +53,10 @@
 
           <section class="rail-panel compact filter-panel" aria-label="检索筛选">
             <label class="field" for="inputProjectSearch">
-              <input type="search" id="inputProjectSearch" placeholder="搜索" autocomplete="off" spellcheck="false">
+              <input type="search" id="inputProjectSearch" name="projectSearch" placeholder="搜索项目…" autocomplete="off" spellcheck="false">
             </label>
             <label class="field" for="filterDeployState">
-              <select id="filterDeployState">
+              <select id="filterDeployState" name="deployStateFilter" autocomplete="off">
                 <option value="all">全部</option>
                 <option value="ready">可部署</option>
                 <option value="deployed">已部署</option>
@@ -136,7 +138,7 @@
             <button class="btn btn-secondary btn-open-path" type="button" id="btnOpenAddDir">打开</button>
           </div>
           <div class="path-quick-row">
-            <select id="addRecentDir" aria-label="添加项目最近路径">
+            <select id="addRecentDir" name="addRecentDir" aria-label="添加项目最近路径" autocomplete="off">
               <option value="">最近使用路径…</option>
             </select>
             <button class="btn btn-secondary btn-sm" type="button" id="btnApplyAddRecent">使用</button>
@@ -200,7 +202,7 @@
             <button class="btn btn-secondary btn-open-path" type="button" id="btnOpenEditDir">打开</button>
           </div>
           <div class="path-quick-row">
-            <select id="editRecentDir" aria-label="编辑项目最近路径">
+            <select id="editRecentDir" name="editRecentDir" aria-label="编辑项目最近路径" autocomplete="off">
               <option value="">最近使用路径…</option>
             </select>
             <button class="btn btn-secondary btn-sm" type="button" id="btnApplyEditRecent">使用</button>
@@ -251,7 +253,7 @@
             <span class="hint edit-json-hint"></span>
           </div>
           <div class="path-quick-row" id="editReuseConfigRow" hidden>
-            <select id="editReuseProjectSelect" aria-label="选择要复用的项目配置">
+            <select id="editReuseProjectSelect" name="reuseProjectConfig" aria-label="选择要复用的项目配置" autocomplete="off">
               <option value="">请选择项目配置…</option>
             </select>
             <button class="btn btn-secondary btn-sm" type="button" id="btnApplyReuseProjectConfig">应用</button>
