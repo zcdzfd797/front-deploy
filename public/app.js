@@ -315,17 +315,33 @@ function renderGroupList() {
   groupList.innerHTML = html;
 }
 
-function getBackupFolderBaseName(project) {
-  const packDirName = String(project?.packDirName || "").trim();
+function getTargetPack(project, targetId) {
+  return (project?.packs && typeof project.packs === "object" && project.packs[targetId]) || null;
+}
+
+function isTargetPacked(project, targetId) {
+  const pack = getTargetPack(project, targetId);
+  return Boolean(pack?.zipExists && pack?.zipPath);
+}
+
+function getTargetBuildCmd(project, targetId) {
+  const override = String(project?.buildCmds?.[targetId] || "").trim();
+  if (override) return override;
+  return String(project?.buildCmd || "").trim() || "npm run build";
+}
+
+function getBackupFolderBaseName(project, targetId) {
+  const pack = getTargetPack(project, targetId);
+  const packDirName = String(pack?.packDirName || "").trim();
   if (packDirName) return packDirName;
 
-  const zipName = String(project?.zipName || "").trim();
+  const zipName = String(pack?.zipName || "").trim();
   if (zipName) {
     const fileName = zipName.split(/[\\/]/).pop() || zipName;
     return fileName.replace(/\.zip$/i, "");
   }
 
-  const zipPath = String(project?.zipPath || "").trim();
+  const zipPath = String(pack?.zipPath || "").trim();
   const fileName = zipPath.split(/[\\/]/).pop() || "";
   return fileName.replace(/\.zip$/i, "");
 }
@@ -448,23 +464,26 @@ function hasDeployConfig(project) {
 
 function getProjectRuntimeStatus(project) {
   const branchReady = Boolean(String(project?.branch || "").trim());
-  const zipExists = Boolean(project?.zipExists && project?.zipPath);
   const targets = getProjectTargets(project);
   const targetCount = targets.length;
+  const packedCount = targets.filter((item) => isTargetPacked(project, item.path.id)).length;
+  const zipExists = packedCount > 0;
   const deployConfigured = targetCount > 0;
   const deployedCount = targets.filter((item) => isTargetDeployed(project, item.path.id)).length;
   const deployed = deployedCount > 0;
   const fullyDeployed = targetCount > 0 && deployedCount === targetCount;
-  const deployReady = branchReady && zipExists && deployConfigured;
+  const deployReady = branchReady && packedCount > 0 && deployConfigured;
   const needsConfig = !branchReady || !deployConfigured;
   return {
     branchReady,
     zipExists,
+    packedCount,
+    targets,
+    targetCount,
     deployConfigured,
     deployed,
     fullyDeployed,
     deployedCount,
-    targetCount,
     deployReady,
     needsConfig
   };
@@ -576,6 +595,165 @@ function renderTodayInfo() {
   }).format(new Date());
   const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
   todayInfo.textContent = `${dateText} · 端口 ${port}`;
+}
+
+/* ===== 悬浮操作终端：显示/隐藏、折叠、拖拽、位置持久化 ===== */
+
+const TERMINAL_STATE_KEY = "frontDeploy.terminalState";
+const TERMINAL_MIN_WIDTH = 320;
+const TERMINAL_MIN_HEIGHT = 200;
+
+function loadTerminalState() {
+  const defaults = { visible: true, collapsed: false, left: null, top: null, width: null, height: null };
+  try {
+    const raw = window.localStorage.getItem(TERMINAL_STATE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw);
+    return {
+      visible: typeof parsed.visible === "boolean" ? parsed.visible : defaults.visible,
+      collapsed: typeof parsed.collapsed === "boolean" ? parsed.collapsed : defaults.collapsed,
+      left: Number.isFinite(parsed.left) ? parsed.left : null,
+      top: Number.isFinite(parsed.top) ? parsed.top : null,
+      width: Number.isFinite(parsed.width) ? parsed.width : null,
+      height: Number.isFinite(parsed.height) ? parsed.height : null
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+let terminalState = loadTerminalState();
+
+function clampTerminalCoord(value, min, max) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function saveTerminalState() {
+  const deck = byId("rightPanel");
+  if (deck && deck.offsetWidth) {
+    terminalState.width = Math.round(deck.offsetWidth);
+    if (!terminalState.collapsed) {
+      terminalState.height = Math.round(deck.offsetHeight);
+    }
+  }
+  try {
+    window.localStorage.setItem(TERMINAL_STATE_KEY, JSON.stringify(terminalState));
+  } catch {}
+}
+
+function applyTerminalState() {
+  const deck = byId("rightPanel");
+  if (!deck) return;
+
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const width = clampTerminalCoord(
+    terminalState.width || 540,
+    TERMINAL_MIN_WIDTH,
+    Math.max(TERMINAL_MIN_WIDTH, viewportWidth - 16)
+  );
+  const height = clampTerminalCoord(
+    terminalState.height || Math.round(viewportHeight * 0.6),
+    TERMINAL_MIN_HEIGHT,
+    Math.max(TERMINAL_MIN_HEIGHT, viewportHeight - 16)
+  );
+
+  if (terminalState.left === null || terminalState.top === null) {
+    terminalState.left = viewportWidth - width - 18;
+    terminalState.top = viewportHeight - height - 18;
+  }
+  terminalState.left = clampTerminalCoord(terminalState.left, 8, Math.max(8, viewportWidth - 120));
+  terminalState.top = clampTerminalCoord(terminalState.top, 8, Math.max(8, viewportHeight - 48));
+
+  deck.style.left = `${Math.round(terminalState.left)}px`;
+  deck.style.top = `${Math.round(terminalState.top)}px`;
+  deck.style.width = `${Math.round(width)}px`;
+  deck.style.height = `${Math.round(height)}px`;
+
+  deck.classList.toggle("is-hidden", !terminalState.visible);
+  deck.classList.toggle("is-collapsed", terminalState.collapsed);
+
+  const toggleBtn = byId("btnToggleTerminal");
+  if (toggleBtn) {
+    toggleBtn.setAttribute("aria-pressed", String(terminalState.visible));
+  }
+  const collapseBtn = byId("btnCollapseTerminal");
+  if (collapseBtn) {
+    collapseBtn.textContent = terminalState.collapsed ? "展开" : "折叠";
+    collapseBtn.setAttribute("aria-expanded", String(!terminalState.collapsed));
+  }
+}
+
+function setTerminalVisible(visible) {
+  terminalState.visible = visible;
+  applyTerminalState();
+  saveTerminalState();
+}
+
+function ensureTerminalVisible() {
+  if (!terminalState.visible) setTerminalVisible(true);
+}
+
+function initTerminalFloating() {
+  const deck = byId("rightPanel");
+  const handle = byId("terminalDragHandle");
+  if (!deck || !handle) return;
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.target.closest("button")) return;
+
+    const rect = deck.getBoundingClientRect();
+    const offsetX = event.clientX - rect.left;
+    const offsetY = event.clientY - rect.top;
+    deck.classList.add("is-dragging");
+
+    const onMove = (moveEvent) => {
+      terminalState.left = clampTerminalCoord(
+        moveEvent.clientX - offsetX,
+        8,
+        Math.max(8, window.innerWidth - 120)
+      );
+      terminalState.top = clampTerminalCoord(
+        moveEvent.clientY - offsetY,
+        8,
+        Math.max(8, window.innerHeight - 48)
+      );
+      deck.style.left = `${Math.round(terminalState.left)}px`;
+      deck.style.top = `${Math.round(terminalState.top)}px`;
+    };
+    const onUp = () => {
+      deck.classList.remove("is-dragging");
+      window.removeEventListener("pointermove", onMove);
+      saveTerminalState();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+    event.preventDefault();
+  });
+
+  byId("btnToggleTerminal").addEventListener("click", () => {
+    setTerminalVisible(!terminalState.visible);
+    if (terminalState.visible) {
+      showToast("操作终端已显示。", "info", 1600);
+    }
+  });
+
+  byId("btnHideTerminal").addEventListener("click", () => {
+    setTerminalVisible(false);
+    showToast("操作终端已隐藏，可从顶部“操作终端”按钮再次打开。", "info", 2400);
+  });
+
+  byId("btnCollapseTerminal").addEventListener("click", () => {
+    terminalState.collapsed = !terminalState.collapsed;
+    applyTerminalState();
+    saveTerminalState();
+  });
+
+  window.addEventListener("resize", () => {
+    applyTerminalState();
+  });
+  window.addEventListener("beforeunload", saveTerminalState);
+  applyTerminalState();
 }
 
 async function openFolderByPath(rawPath) {
@@ -701,12 +879,14 @@ function renderList() {
         : "未填写";
       const buildCmd = escapeHtml(safeText(project.buildCmd, "npm run build"));
 
-      const packTip = runtime.branchReady ? "" : "请先在项目配置中填写记录分支";
+      const packTip = !runtime.branchReady
+        ? "请先在项目配置中填写记录分支"
+        : (!runtime.deployConfigured ? "请先关联部署目标" : "");
       const deployTip = !runtime.branchReady
         ? "记录分支为空，请先编辑项目并填写分支"
         : (!runtime.deployConfigured
           ? "请先关联部署目标"
-          : (!runtime.zipExists ? "请先打包项目" : ""));
+          : (!runtime.packedCount ? "请先打包项目（按目标打包）" : ""));
       const gitRefreshReady = Boolean(String(project.dirPath || "").trim());
       const gitRefreshTip = gitRefreshReady ? "" : "项目路径为空，无法刷新 Git";
       const linkedServers = getProjectLinkedServers(project);
@@ -730,15 +910,17 @@ function renderList() {
       const healthTips = [];
       if (!runtime.branchReady) healthTips.push("未记录分支");
       if (!runtime.deployConfigured) healthTips.push("未关联部署目标");
-      if (!runtime.zipExists) healthTips.push("还未生成压缩包");
-      const healthText = healthTips.length ? healthTips.join(" · ") : `已关联 ${runtime.targetCount} 个部署目标`;
+      if (runtime.deployConfigured && !runtime.packedCount) healthTips.push("还未按目标打包");
+      const healthText = healthTips.length ? healthTips.join(" · ") : `已关联 ${runtime.targetCount} 个目标（${runtime.packedCount} 个已打包）`;
       const healthClass = healthTips.length ? "warn" : "ok";
 
-      const backupFolderBaseName = getBackupFolderBaseName(project);
       const backupDeleteTip = !runtime.deployConfigured
         ? "请先关联部署目标"
-        : (!backupFolderBaseName ? "缺少备份目录名称，请先至少打包一次项目" : "");
-      const backupDeleteReady = runtime.deployConfigured && Boolean(backupFolderBaseName);
+        : (!runtime.packedCount ? "请先打包项目（按目标打包）" : "");
+      const backupDeleteReady = runtime.deployConfigured && runtime.packedCount > 0;
+      const overrideCmdCount = Object.keys(project.buildCmds || {}).filter((id) =>
+        String(project.buildCmds[id] || "").trim() && runtime.targets.some((item) => item.path.id === id)
+      ).length;
 
       return `
       <article class="project-card" data-id="${projectId}">
@@ -765,15 +947,15 @@ function renderList() {
               <span>访问地址：${accessUrlHtml}</span>
             </div>
             ${remark ? `<div class="card-meta secondary"><span class="card-remark">备注：${escapeHtml(remark)}</span></div>` : ""}
-            <div class="card-meta secondary"><span>构建命令：${buildCmd}</span></div>
-            ${runtime.zipExists ? `
+            <div class="card-meta secondary"><span>构建命令：${buildCmd}${overrideCmdCount ? `（${overrideCmdCount} 个目标单独配置）` : ""}</span></div>
+            ${runtime.packedCount ? `
               <div class="card-meta secondary">
-                <span class="zip-info">压缩包：${escapeHtml(safeText(project.zipSize, "-"))} (${escapeHtml(safeText(project.packTime, "-"))})</span>
+                <span class="zip-info">打包：${runtime.packedCount}/${runtime.targetCount} 个目标就绪${project.packTime ? `（最近 ${escapeHtml(safeText(project.packTime, "-"))}）` : ""}</span>
                 <button
                   class="btn btn-xs btn-secondary btn-open-zip"
                   type="button"
                   data-path="${escapeHtml(safeText(project.zipPath, ""))}"
-                  aria-label="打开 ${projectName} 的压缩包位置"
+                  aria-label="打开 ${projectName} 最近一次打包的压缩包位置"
                 >打开</button>
               </div>
             ` : ""}
@@ -855,9 +1037,13 @@ function renderList() {
           const chips = targets.map(({ server, path: pathEntry }) => {
             const deployedFlag = isTargetDeployed(project, pathEntry.id);
             const state = getTargetDeployState(project, pathEntry.id);
-            const chipTitle = deployedFlag
-              ? `已部署 ${safeText(state?.lastDeployTime, "")}，点击再次部署到该目标`
-              : "该目标尚未部署，点击部署到该目标";
+            const packedFlag = isTargetPacked(project, pathEntry.id);
+            const chipReady = runtime.branchReady && packedFlag;
+            const chipTitle = packedFlag
+              ? (deployedFlag
+                ? `已部署 ${safeText(state?.lastDeployTime, "")}，点击再次部署到该目标`
+                : "该目标尚未部署，点击部署到该目标")
+              : "该目标尚未打包，请先在“打包”中选择此目标";
             return `
             <button
               class="target-chip"
@@ -867,7 +1053,7 @@ function renderList() {
               data-name="${projectName}"
               title="${escapeHtml(`${getTargetLabel(server, pathEntry)} ${pathEntry.deployPath} · ${chipTitle}`)}"
               aria-label="部署 ${projectName} 到 ${escapeHtml(getTargetLabel(server, pathEntry))}"
-              ${runtime.deployReady ? "" : "disabled"}
+              ${chipReady ? "" : "disabled"}
             >
               <span class="target-chip-status ${deployedFlag ? "deployed" : ""}" aria-hidden="true"></span>
               <span class="target-chip-name">${escapeHtml(safeText(server.name))}</span>
@@ -936,16 +1122,17 @@ function renderTargetView() {
         const runtime = getProjectRuntimeStatus(project);
         const deployedFlag = isTargetDeployed(project, pathEntry.id);
         const state = getTargetDeployState(project, pathEntry.id);
+        const packedFlag = isTargetPacked(project, pathEntry.id);
         const deployTitle = !runtime.branchReady
           ? "记录分支为空，请先编辑项目并填写分支"
-          : (!runtime.zipExists ? "请先打包项目" : `部署 ${safeText(project.projectName)} 到该目标`);
+          : (!packedFlag ? "该目标尚未打包，请先打包" : `部署 ${safeText(project.projectName)} 到该目标`);
         return `
           <div class="target-project-row">
             <span class="target-project-name">${escapeHtml(safeText(project.projectName))}</span>
             <span class="target-project-meta">
               <span class="badge group">${escapeHtml(normalizeGroupName(project.groupName))}</span>
               <span class="badge">${escapeHtml(runtime.branchReady ? safeText(project.branch) : "未记录分支")}</span>
-              ${runtime.zipExists ? `<span>已打包</span>` : `<span>未打包</span>`}
+              ${packedFlag ? `<span>已打包</span>` : `<span>未打包</span>`}
             </span>
             <span class="target-project-status">
               <span class="status ${deployedFlag ? "success" : ""}">${deployedFlag ? "已部署" : "未部署"}</span>
@@ -956,7 +1143,7 @@ function renderTargetView() {
                 data-target-deploy="${escapeHtml(pathEntry.id)}"
                 data-id="${escapeHtml(project.id)}"
                 data-name="${escapeHtml(safeText(project.projectName))}"
-                ${runtime.branchReady && runtime.zipExists ? "" : "disabled"}
+                ${runtime.branchReady && packedFlag ? "" : "disabled"}
                 ${deployTitle ? `title="${escapeHtml(deployTitle)}"` : ""}
                 aria-label="部署 ${escapeHtml(safeText(project.projectName))} 到 ${escapeHtml(getTargetLabel(server, pathEntry))}"
               >部署到此</button>
@@ -1009,23 +1196,6 @@ function updateEditingCardHighlight() {
     const isEditing = Boolean(editingId) && String(card.dataset.id || "") === editingId;
     card.classList.toggle("is-editing-current", isEditing);
   });
-}
-
-function syncEditModalOverlayMetrics() {
-  const overlay = byId("editModal");
-  const rightPanel = byId("rightPanel");
-  if (!overlay || !rightPanel) return;
-
-  const rect = rightPanel.getBoundingClientRect();
-  const width = Math.max(360, Math.round(rect.width));
-  const height = Math.max(320, Math.round(rect.height));
-  const left = Math.max(0, Math.round(rect.left));
-  const top = Math.max(0, Math.round(rect.top));
-
-  overlay.style.setProperty("--edit-overlay-left", `${left}px`);
-  overlay.style.setProperty("--edit-overlay-top", `${top}px`);
-  overlay.style.setProperty("--edit-overlay-width", `${width}px`);
-  overlay.style.setProperty("--edit-overlay-height", `${height}px`);
 }
 
 function openModal(id) {
@@ -1157,11 +1327,6 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault();
   searchInput.focus();
   searchInput.select();
-});
-
-window.addEventListener("resize", () => {
-  if (!isModalOpen("editModal")) return;
-  syncEditModalOverlayMetrics();
 });
 
 const btnConfirmCancel = byId("btnConfirmCancel");
@@ -1476,6 +1641,13 @@ function getTargetPickerItems() {
   return getProjectTargets(getProjectById(state.projectId));
 }
 
+// deploy 模式下未打包的目标不可选择
+function isTargetPickerItemSelectable(item) {
+  if (!targetPickerState || targetPickerState.mode !== "deploy") return true;
+  const project = getProjectById(targetPickerState.projectId);
+  return project ? isTargetPacked(project, item.path.id) : false;
+}
+
 function renderTargetPicker() {
   const state = targetPickerState;
   const listEl = byId("targetPickerList");
@@ -1514,17 +1686,32 @@ function renderTargetPicker() {
     <div class="target-picker-group">
       <div class="target-picker-group-title">${escapeHtml(safeText(server.name))} · ${escapeHtml(safeText(server.host))}:${escapeHtml(safeText(server.port, 22))}</div>
       ${groupItems.map(({ path: pathEntry }) => {
+        const project = getProjectById(state.projectId);
         const selected = state.selectedIds.includes(pathEntry.id);
+        const selectable = isTargetPickerItemSelectable({ server, path: pathEntry });
+        const packedFlag = project ? isTargetPacked(project, pathEntry.id) : false;
+        const pack = project ? getTargetPack(project, pathEntry.id) : null;
+
+        let meta = "";
+        if (state.mode === "link" && Number(pathEntry.usedCount) > 0) {
+          meta = `${pathEntry.usedCount} 个项目在用`;
+        } else if (state.mode === "deploy") {
+          meta = packedFlag ? (pack?.packTime ? `已打包 ${safeText(pack.packTime)}` : "已打包") : "未打包";
+        } else if (state.mode === "pack") {
+          const buildCmd = project ? getTargetBuildCmd(project, pathEntry.id) : "";
+          meta = `${buildCmd}${packedFlag ? ` · 已打包${pack?.packTime ? ` ${safeText(pack.packTime)}` : ""}` : " · 未打包"}`;
+        }
+
         const input = single
           ? `<input type="radio" name="targetPickerChoice" value="${escapeHtml(pathEntry.id)}" ${selected ? "checked" : ""}>`
-          : `<input type="checkbox" data-picker-path-id="${escapeHtml(pathEntry.id)}" ${selected ? "checked" : ""}>`;
+          : `<input type="checkbox" data-picker-path-id="${escapeHtml(pathEntry.id)}" ${selected ? "checked" : ""} ${selectable ? "" : "disabled title=\"该目标尚未打包，无法部署\""}>`;
         return `
-        <label class="target-picker-item">
+        <label class="target-picker-item ${selectable ? "" : "is-disabled"}">
           ${input}
           <span class="target-picker-item-body">
             <span class="target-picker-item-name">${escapeHtml(String(pathEntry.label || "").trim() || "部署路径")}</span>
             <span class="target-picker-item-path" title="${escapeHtml(safeText(pathEntry.deployPath))}">${escapeHtml(safeText(pathEntry.deployPath))}</span>
-            ${state.mode === "link" && Number(pathEntry.usedCount) > 0 ? `<span class="target-picker-item-meta">${pathEntry.usedCount} 个项目在用</span>` : ""}
+            ${meta ? `<span class="target-picker-item-meta">${escapeHtml(meta)}</span>` : ""}
           </span>
         </label>
         `;
@@ -1552,6 +1739,7 @@ function syncTargetPickerControls() {
     confirmBtn.disabled = selectedCount === 0;
     if (single) confirmBtn.textContent = "查看备份";
     else if (state.mode === "deploy") confirmBtn.textContent = `部署 ${selectedCount} 个目标`;
+    else if (state.mode === "pack") confirmBtn.textContent = `打包 ${selectedCount} 个目标`;
     else confirmBtn.textContent = `关联 ${selectedCount} 个目标`;
   }
 }
@@ -1563,17 +1751,22 @@ function openTargetPicker({ mode, projectId = null }) {
 
   let selectedIds;
   if (mode === "deploy") {
-    selectedIds = items.map((item) => item.path.id);
+    // 部署只默认勾选已打包的目标
+    const project = getProjectById(projectId);
+    selectedIds = items
+      .filter((item) => !project || isTargetPacked(project, item.path.id))
+      .map((item) => item.path.id);
   } else if (mode === "backup") {
     selectedIds = items.length ? [items[0].path.id] : [];
   } else {
-    selectedIds = [...currentEditTargetIds];
+    selectedIds = mode === "link" ? [...currentEditTargetIds] : items.map((item) => item.path.id);
   }
 
   const titles = {
     deploy: "选择部署目标",
     backup: "选择备份目标",
-    link: "关联部署目标"
+    link: "关联部署目标",
+    pack: "选择打包目标"
   };
   byId("targetPickerTitle").textContent = titles[mode] || "选择部署目标";
 
@@ -1613,10 +1806,13 @@ byId("targetPickerActions").addEventListener("click", (event) => {
 
   const items = getTargetPickerItems();
   if (button.dataset.pickerAction === "select-all") {
-    state.selectedIds = items.map((item) => item.path.id);
+    state.selectedIds = items.filter(isTargetPickerItemSelectable).map((item) => item.path.id);
   } else if (button.dataset.pickerAction === "invert-selection") {
     const current = new Set(state.selectedIds);
-    state.selectedIds = items.map((item) => item.path.id).filter((id) => !current.has(id));
+    state.selectedIds = items
+      .filter(isTargetPickerItemSelectable)
+      .map((item) => item.path.id)
+      .filter((id) => !current.has(id));
   }
   renderTargetPicker();
 });
@@ -1630,6 +1826,72 @@ byId("btnTargetPickerConfirm").addEventListener("click", () => {
 });
 
 /* ===== 部署流程 ===== */
+
+async function startPackFlow(projectId, triggerButton) {
+  const project = getProjectById(projectId);
+  if (!project) {
+    showToast("未找到项目，无法打包。", "warn");
+    return;
+  }
+  const projectName = safeText(project.projectName, "当前项目");
+  if (!getProjectTargets(project).length) {
+    showToast("该项目尚未关联部署目标，请先编辑项目进行关联。", "warn");
+    return;
+  }
+
+  const selectedIds = await openTargetPicker({ mode: "pack", projectId });
+  if (!selectedIds) return;
+  if (!selectedIds.length) {
+    showToast("请至少选择一个打包目标。", "warn");
+    return;
+  }
+
+  await withButtonLoading(triggerButton, "打包中…", async () => {
+    termClear();
+    termSeparator(`打包前刷新 Git ${projectName}`);
+    termCmd("开始刷新本地 Git 信息…");
+    setOperationStatus("running", "状态：打包前Git刷新中", "最近动作：正在读取本地 Git 信息");
+    try {
+      const updated = await syncProjectGitInfo(projectId);
+      termSuccess(`Git 信息已刷新：${safeText(updated.branch, "-")} ${safeText(updated.commitHash, "-")}`);
+      setOperationStatus("success", "状态：打包前Git已刷新");
+    } catch (error) {
+      const message = normalizeErrorMessage(error.message);
+      termError(`Git 刷新失败：${message}`);
+      setOperationStatus("error", "状态：打包前Git刷新失败");
+      showToast(`打包前 Git 刷新失败：${message}`, "error", 3600);
+      return;
+    }
+
+    const gitReady = await checkRemoteAndLocalGitBeforePack(projectId, projectName);
+    if (!gitReady) return;
+
+    const dirtyStrategy = await choosePackGitDirtyStrategy(projectId, projectName);
+    if (!dirtyStrategy.proceed) return;
+
+    termCmd("开始执行分支校验…");
+    const allowed = await validateBranchBeforeAction(projectId, projectName, "打包", { resetTerminal: false });
+    if (!allowed) return;
+
+    termLog("分支校验通过，进入构建与打包阶段。");
+    termSeparator(`开始打包 ${projectName}（${selectedIds.length} 个目标）`);
+    try {
+      const result = await runStreamingFetch(`/api/pack/${projectId}`, `打包 ${projectName}`, {
+        body: { targetIds: selectedIds, autoStash: dirtyStrategy.autoStash }
+      });
+      await loadProjects({ silent: true });
+      const successCount = Number(result?.successCount) || 0;
+      const failedCount = Number(result?.failedCount) || 0;
+      if (failedCount > 0) {
+        showToast(`打包结束：成功 ${successCount} 个 / 失败 ${failedCount} 个目标。`, "warn", 3600);
+      } else {
+        showToast(`项目 ${projectName} 已完成 ${successCount} 个目标的打包。`, "success");
+      }
+    } catch (error) {
+      showToast(`打包失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
+    }
+  });
+}
 
 async function startDeployFlow(projectId, triggerButton, presetTargetIds = null) {
   const project = getProjectById(projectId);
@@ -2302,7 +2564,7 @@ async function openBackupSelector(projectId, targetId, triggerButton) {
     return;
   }
 
-  const backupFolderBaseName = getBackupFolderBaseName(project);
+  const backupFolderBaseName = getBackupFolderBaseName(project, targetId);
   if (!backupFolderBaseName) {
     showToast("缺少备份目录名称，请先至少打包一次项目。", "warn");
     return;
@@ -2762,45 +3024,7 @@ byId("projectList").addEventListener("click", async (event) => {
   }
 
   if (button.classList.contains("btn-pack")) {
-    await withButtonLoading(button, "打包中…", async () => {
-      termClear();
-      termSeparator(`打包前刷新 Git ${projectName}`);
-      termCmd("开始刷新本地 Git 信息…");
-      setOperationStatus("running", "状态：打包前Git刷新中", "最近动作：正在读取本地 Git 信息");
-      try {
-        const updated = await syncProjectGitInfo(projectId);
-        termSuccess(`Git 信息已刷新：${safeText(updated.branch, "-")} ${safeText(updated.commitHash, "-")}`);
-        setOperationStatus("success", "状态：打包前Git已刷新");
-      } catch (error) {
-        const message = normalizeErrorMessage(error.message);
-        termError(`Git 刷新失败：${message}`);
-        setOperationStatus("error", "状态：打包前Git刷新失败");
-        showToast(`打包前 Git 刷新失败：${message}`, "error", 3600);
-        return;
-      }
-
-      const gitReady = await checkRemoteAndLocalGitBeforePack(projectId, projectName);
-      if (!gitReady) return;
-
-      const dirtyStrategy = await choosePackGitDirtyStrategy(projectId, projectName);
-      if (!dirtyStrategy.proceed) return;
-
-      termCmd("开始执行分支校验…");
-      const allowed = await validateBranchBeforeAction(projectId, projectName, "打包", { resetTerminal: false });
-      if (!allowed) return;
-
-      termLog("分支校验通过，进入构建与打包阶段。");
-      termSeparator(`开始打包 ${projectName}`);
-      try {
-        await runStreamingFetch(`/api/pack/${projectId}`, `打包 ${projectName}`, {
-          body: { autoStash: dirtyStrategy.autoStash }
-        });
-        await loadProjects({ silent: true });
-        showToast(`项目 ${projectName} 打包完成。`, "success");
-      } catch (error) {
-        showToast(`打包失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
-      }
-    });
+    await startPackFlow(projectId, button);
     return;
   }
 
@@ -2859,6 +3083,43 @@ if (emptyState) {
   });
 }
 
+function collectEditBuildCmds() {
+  const result = {};
+  $$("#editBuildCmdList input[data-buildcmd-target]").forEach((input) => {
+    result[input.dataset.buildcmdTarget] = input.value.trim();
+  });
+  return result;
+}
+
+function renderEditBuildCmdList() {
+  const container = byId("editBuildCmdList");
+  if (!container) return;
+
+  if (!currentEditTargetIds.length) {
+    container.innerHTML = `<div class="edit-buildcmd-empty">尚未关联部署目标，关联后可为每个目标单独配置构建命令。</div>`;
+    return;
+  }
+
+  // 保留输入框中未保存的编辑，仅新关联的目标回落到已存值
+  const draft = collectEditBuildCmds();
+  const project = getProjectById(currentEditId);
+  container.innerHTML = currentEditTargetIds.map((pathId) => {
+    const found = findPathById(pathId);
+    if (!found) return "";
+    const stored = String(project?.buildCmds?.[pathId] || "").trim();
+    const value = Object.prototype.hasOwnProperty.call(draft, pathId) ? draft[pathId] : stored;
+    return `
+      <div class="edit-buildcmd-row">
+        <div class="edit-buildcmd-target">
+          <span class="edit-buildcmd-name">${escapeHtml(getTargetLabel(found.server, found.path))}</span>
+          <span class="edit-buildcmd-path" title="${escapeHtml(safeText(found.path.deployPath))}">${escapeHtml(safeText(found.path.deployPath))}</span>
+        </div>
+        <input type="text" data-buildcmd-target="${escapeHtml(pathId)}" value="${escapeHtml(value)}" placeholder="留空使用默认构建命令" autocomplete="off" spellcheck="false">
+      </div>
+    `;
+  }).join("");
+}
+
 function renderEditTargetList() {
   const container = byId("editTargetList");
   const hint = byId("editTargetHint");
@@ -2899,6 +3160,7 @@ byId("editTargetList").addEventListener("click", (event) => {
   if (!button) return;
   currentEditTargetIds = currentEditTargetIds.filter((id) => id !== button.dataset.removeTarget);
   renderEditTargetList();
+  renderEditBuildCmdList();
 });
 
 byId("btnPickTargets").addEventListener("click", async () => {
@@ -2906,6 +3168,7 @@ byId("btnPickTargets").addEventListener("click", async () => {
   if (!selected) return;
   currentEditTargetIds = selected;
   renderEditTargetList();
+  renderEditBuildCmdList();
   showToast(`已选择 ${selected.length} 个部署目标。`, "success", 1800);
 });
 
@@ -2931,8 +3194,8 @@ function openEditModal(id) {
 
   currentEditTargetIds = getProjectTargets(project).map(({ path }) => path.id);
   renderEditTargetList();
+  renderEditBuildCmdList();
   byId("editRecentDir").value = "";
-  syncEditModalOverlayMetrics();
   updateEditingCardHighlight();
   openModal("editModal");
 }
@@ -3002,6 +3265,7 @@ byId("btnSaveEdit").addEventListener("click", async () => {
     accessUrl: normalizeAccessUrl(byId("editAccessUrl").value),
     groupName: toStoredGroupName(byId("editGroupName").value),
     buildCmd: byId("editBuildCmd").value.trim() || "npm run build",
+    buildCmds: collectEditBuildCmds(),
     targetIds: [...currentEditTargetIds]
   };
 
@@ -3081,4 +3345,5 @@ resetTerminal();
 renderTodayInfo();
 renderRecentDirOptions();
 updateServerCountBadge();
+initTerminalFloating();
 loadProjects();

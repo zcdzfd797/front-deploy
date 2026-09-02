@@ -78,7 +78,7 @@ body {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(500px, 38vw);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   overflow: hidden;
 }
@@ -1043,52 +1043,6 @@ select:focus-visible,
   display: flex;
 }
 
-.modal-overlay-terminal {
-  inset: var(--edit-overlay-top, 0) auto auto var(--edit-overlay-left, 0);
-  width: var(--edit-overlay-width, 560px);
-  height: var(--edit-overlay-height, 100vh);
-  padding: 0;
-  justify-content: stretch;
-  align-items: stretch;
-  background: rgba(6, 18, 38, 0.24);
-}
-
-.modal-overlay-terminal .modal {
-  width: 100%;
-  max-height: none;
-  height: 100%;
-  border-radius: 0;
-}
-
-.modal-overlay-terminal .modal-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.modal-edit-terminal {
-  display: flex;
-  flex-direction: column;
-  border-color: #6f94c2;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.56)),
-    var(--panel);
-}
-
-.modal-edit-terminal .modal-body {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.62)),
-    var(--panel-soft);
-  color: #112c4d;
-}
-
-.modal-edit-terminal .modal-footer {
-  border-top-color: #9fb6d7;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.62)),
-    var(--panel-soft);
-}
-
 .modal {
   width: min(700px, 100%);
   max-height: calc(100vh - 20px);
@@ -1309,10 +1263,6 @@ body.modal-open {
 }
 
 @media (max-width: 1520px) {
-  .app-frame {
-    grid-template-columns: minmax(0, 1fr) minmax(430px, 35vw);
-  }
-
   .workspace {
     grid-template-columns: minmax(280px, 23vw) minmax(0, 1fr);
   }
@@ -1369,22 +1319,6 @@ body.modal-open {
     max-height: 320px;
   }
 
-  .modal-overlay-terminal {
-    inset: 0;
-    width: auto;
-    height: auto;
-    padding: 10px;
-    justify-content: center;
-    align-items: center;
-    background: rgba(5, 17, 35, 0.34);
-  }
-
-  .modal-overlay-terminal .modal {
-    width: min(800px, 100%);
-    max-height: calc(100vh - 20px);
-    height: auto;
-    border-radius: var(--radius-md);
-  }
 }
 
 @media (max-width: 900px) {
@@ -1555,10 +1489,10 @@ body::before {
 .app-frame {
   position: relative;
   z-index: 1;
-  grid-template-columns: minmax(0, 1fr) minmax(480px, 35vw);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 10px;
-  background: transparent;
+  box-shadow: var(--shadow-md);
 }
 
 .control-shell {
@@ -1791,8 +1725,7 @@ body::before {
 .project-list,
 .terminal,
 .backup-selector-list,
-.modal-body,
-.modal-overlay-terminal .modal-body {
+.modal-body {
   scrollbar-color: rgba(44, 44, 44, 0.34) transparent;
   scrollbar-width: thin;
 }
@@ -2505,25 +2438,6 @@ select:focus-visible,
   background: rgba(44, 44, 44, 0.035);
 }
 
-.modal-overlay-terminal {
-  background: rgba(26, 24, 20, 0.18);
-}
-
-.modal-overlay-terminal .modal {
-  border-radius: var(--radius-md);
-}
-
-.modal-edit-terminal {
-  border-color: var(--dash-strong);
-  background: var(--paper-warm);
-}
-
-.modal-edit-terminal .modal-body,
-.modal-edit-terminal .modal-footer {
-  background: transparent;
-  color: var(--ink);
-}
-
 .confirm-message {
   color: var(--ink-soft);
   font-size: 15px;
@@ -2687,10 +2601,6 @@ select:focus-visible,
 }
 
 @media (max-width: 1520px) {
-  .app-frame {
-    grid-template-columns: minmax(0, 1fr) minmax(420px, 34vw);
-  }
-
   .workspace {
     grid-template-columns: minmax(250px, 22vw) minmax(0, 1fr);
   }
@@ -2749,9 +2659,6 @@ select:focus-visible,
     max-height: 360px;
   }
 
-  .modal-overlay-terminal .modal {
-    border-radius: var(--radius-md);
-  }
 }
 
 @media (max-width: 900px) {
@@ -3039,8 +2946,8 @@ textarea {
   }
 }
 
-/* Full-height command line on the right panel. */
-.terminal-deck.right-panel {
+/* Full-height command line in the floating terminal. */
+.terminal-deck.terminal-float {
   background: var(--terminal-bg);
   color: var(--terminal-text);
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -3049,26 +2956,26 @@ textarea {
   overflow: hidden;
 }
 
-.terminal-deck.right-panel .terminal-header {
+.terminal-deck.terminal-float .terminal-header {
   min-height: 58px;
   border-bottom: 2px dashed rgba(245, 240, 232, 0.38);
   background: var(--terminal-bg);
   padding: 12px 16px;
 }
 
-.terminal-deck.right-panel .terminal-header::before {
+.terminal-deck.terminal-float .terminal-header::before {
   box-shadow: 0 0 0 3px rgba(245, 181, 74, 0.22);
 }
 
-.terminal-deck.right-panel .terminal-title {
+.terminal-deck.terminal-float .terminal-title {
   color: var(--terminal-text);
 }
 
-.terminal-deck.right-panel .terminal-title::after {
+.terminal-deck.terminal-float .terminal-title::after {
   color: rgba(247, 234, 216, 0.58);
 }
 
-.terminal-deck.right-panel .terminal-workbench {
+.terminal-deck.terminal-float .terminal-workbench {
   border: 0;
   border-bottom: 1.5px dashed rgba(245, 240, 232, 0.22);
   border-radius: 0;
@@ -3077,15 +2984,15 @@ textarea {
   box-shadow: none;
 }
 
-.terminal-deck.right-panel .terminal-workbench-title {
+.terminal-deck.terminal-float .terminal-workbench-title {
   color: var(--terminal-text);
 }
 
-.terminal-deck.right-panel .terminal-workbench-meta {
+.terminal-deck.terminal-float .terminal-workbench-meta {
   color: rgba(247, 234, 216, 0.66);
 }
 
-.terminal-deck.right-panel .terminal {
+.terminal-deck.terminal-float .terminal {
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -3102,11 +3009,11 @@ textarea {
 }
 
 @media (max-width: 1180px) {
-  .terminal-deck.right-panel {
+  .terminal-deck.terminal-float {
     min-height: 420px;
   }
 
-  .terminal-deck.right-panel .terminal {
+  .terminal-deck.terminal-float .terminal {
     min-height: 320px;
   }
 }
@@ -3803,6 +3710,152 @@ body {
   }
 
   .form-inline-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ===== 悬浮操作终端 ===== */
+.btn-toggle-terminal {
+  flex-shrink: 0;
+}
+
+.terminal-deck.terminal-float {
+  position: fixed;
+  z-index: 1500;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  width: min(560px, calc(100vw - 24px));
+  height: min(62vh, 640px);
+  min-width: 320px;
+  min-height: 200px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  resize: both;
+  box-shadow: 0 24px 48px rgba(9, 26, 52, 0.4);
+  background: var(--paper-warm);
+}
+
+.terminal-float .terminal-header {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.terminal-float .terminal-header:active {
+  cursor: grabbing;
+}
+
+.terminal-drag-grip {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 15px;
+  letter-spacing: 2px;
+}
+
+.terminal-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.terminal-float .terminal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-float .terminal-workbench {
+  flex-shrink: 0;
+  max-height: 45%;
+  overflow-y: auto;
+}
+
+.terminal-float .terminal {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.terminal-float.is-collapsed {
+  height: auto;
+  resize: none;
+}
+
+.terminal-float.is-collapsed .terminal-body {
+  display: none;
+}
+
+.terminal-float.is-hidden {
+  display: none;
+}
+
+/* 按目标构建命令编辑列表 */
+.edit-buildcmd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edit-buildcmd-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  padding: 5px 7px;
+  border: 1px solid #c3d4e9;
+  border-radius: var(--radius-xs);
+  background: #fff;
+}
+
+.edit-buildcmd-row .edit-buildcmd-target {
+  min-width: 0;
+}
+
+.edit-buildcmd-row .edit-buildcmd-name {
+  display: block;
+  color: #1b3b64;
+  font-weight: 600;
+  font-size: 13.2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-buildcmd-row .edit-buildcmd-path {
+  display: block;
+  color: #6c7f9c;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12.6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-buildcmd-row input {
+  width: 100%;
+  min-width: 0;
+}
+
+.edit-buildcmd-empty {
+  border: 1px dashed #9cb2cf;
+  border-radius: var(--radius-xs);
+  padding: 8px;
+  color: #6c7f9c;
+  font-size: 13.2px;
+  text-align: center;
+}
+
+.target-picker-item.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 620px) {
+  .edit-buildcmd-row {
     grid-template-columns: 1fr;
   }
 }

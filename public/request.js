@@ -38,6 +38,7 @@ async function api(url, options = {}) {
 }
 
 async function runStreamingFetch(url, label, options = {}) {
+  if (typeof ensureTerminalVisible === "function") ensureTerminalVisible();
   terminalTitle.textContent = label;
   setOperationStatus("running", `状态：${label}进行中`, "最近动作：日志流已连接");
 

@@ -95,5 +95,6 @@ function termWarn(text) {
 }
 
 function termSeparator(label) {
+  if (typeof ensureTerminalVisible === "function") ensureTerminalVisible();
   appendTerminal(`=== ${label} ===`, "separator");
 }

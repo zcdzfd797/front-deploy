@@ -22,6 +22,14 @@
         </div>
         <div class="top-signal" aria-label="控制台状态">
           <span class="brand-time" id="todayInfo">-</span>
+          <button
+            class="btn btn-sm btn-secondary btn-toggle-terminal"
+            type="button"
+            id="btnToggleTerminal"
+            aria-pressed="true"
+            aria-label="显示或隐藏操作终端"
+            title="显示/隐藏操作终端"
+          >操作终端</button>
           <span class="signal-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
         </div>
       </header>
@@ -116,18 +124,25 @@
         </section>
       </main>
     </div>
+  </div>
 
-    <aside class="terminal-deck panel right-panel" id="rightPanel" aria-label="日志终端">
-      <div class="terminal-header">
-        <h2 class="terminal-title" id="terminalTitle">操作终端</h2>
+  <aside class="terminal-deck terminal-float panel" id="rightPanel" aria-label="日志终端">
+    <div class="terminal-header" id="terminalDragHandle">
+      <span class="terminal-drag-grip" aria-hidden="true">⠿</span>
+      <h2 class="terminal-title" id="terminalTitle">操作终端</h2>
+      <div class="terminal-header-actions">
         <button class="btn btn-xs btn-secondary" type="button" id="btnClearTerminal">清空</button>
+        <button class="btn btn-xs btn-secondary" type="button" id="btnCollapseTerminal" aria-expanded="true" aria-label="折叠操作终端" title="折叠/展开">折叠</button>
+        <button class="btn btn-xs btn-secondary" type="button" id="btnHideTerminal" aria-label="隐藏操作终端" title="隐藏（可从顶部“操作终端”按钮再次打开）">×</button>
       </div>
+    </div>
+    <div class="terminal-body" id="terminalBody">
       <div class="terminal-workbench" id="terminalWorkbench" hidden></div>
       <div class="terminal" id="terminal" role="log" aria-live="polite" aria-relevant="additions text">
         <div class="terminal-line hint">等待操作…</div>
       </div>
-    </aside>
-  </div>
+    </div>
+  </aside>
 
   <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
   <div class="sr-only" id="srAnnouncement" aria-live="polite" aria-atomic="true"></div>
@@ -191,8 +206,8 @@
     </div>
   </div>
 
-  <div class="modal-overlay modal-overlay-terminal" id="editModal" aria-hidden="true" role="presentation">
-    <div class="modal modal-wide modal-edit-terminal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
+  <div class="modal-overlay" id="editModal" aria-hidden="true" role="presentation">
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
       <div class="modal-header">
         <h2 id="editModalTitle">编辑项目</h2>
         <button class="btn-close" type="button" data-close="editModal" aria-label="关闭编辑项目弹窗">×</button>
@@ -250,8 +265,13 @@
 
         <div class="section-title">打包配置</div>
         <div class="form-group">
-          <label for="editBuildCmd">构建命令</label>
+          <label for="editBuildCmd">默认构建命令</label>
           <input type="text" id="editBuildCmd" name="buildCmd" placeholder="例如：npm run build" autocomplete="off">
+          <span class="hint edit-buildcmd-hint">未单独配置构建命令的目标将使用此默认命令。</span>
+        </div>
+        <div class="form-group">
+          <label>按目标构建命令</label>
+          <div class="edit-buildcmd-list" id="editBuildCmdList" aria-label="按目标构建命令列表"></div>
         </div>
 
         <div class="section-title">部署目标</div>

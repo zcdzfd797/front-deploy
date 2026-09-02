@@ -125,6 +125,46 @@ function migrateV1Projects(rawProjects) {
   return data;
 }
 
+// v2 → v2.1：为按目标的构建命令/打包产物字段做一次性种子迁移（幂等）。
+// 旧的单 zip 产物会平摊到当前已关联的每个目标上，保证“已打包”状态不丢失。
+function normalizeProjectTargetFields(data) {
+  let changed = false;
+  data.projects.forEach((project) => {
+    if (!project || typeof project !== 'object') return;
+    if (!project.buildCmds || typeof project.buildCmds !== 'object') {
+      project.buildCmds = {};
+      changed = true;
+    }
+    if (!project.packs || typeof project.packs !== 'object') {
+      project.packs = {};
+      changed = true;
+    }
+
+    const linkedTargetIds = sanitizeTargetIds(data.servers, project.targetIds);
+    if (project.zipPath && linkedTargetIds.length && Object.keys(project.packs).length === 0) {
+      const seed = {
+        zipPath: project.zipPath,
+        zipName: project.zipName || '',
+        packDirName: project.packDirName || '',
+        packTime: project.packTime || ''
+      };
+      linkedTargetIds.forEach((pathId) => {
+        project.packs[pathId] = { ...seed };
+      });
+      changed = true;
+    }
+
+    if (project.zipPath !== undefined) {
+      delete project.zipPath;
+      delete project.zipName;
+      delete project.packDirName;
+      delete project.packTime;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) return createEmptyData();
   const raw = fs.readJsonSync(DATA_FILE);
@@ -134,11 +174,13 @@ function loadData() {
     if (!fs.existsSync(DATA_BACKUP_FILE)) {
       fs.copySync(DATA_FILE, DATA_BACKUP_FILE);
     }
+    normalizeProjectTargetFields(data);
     saveData(data);
     return data;
   }
 
   if (raw && raw.version === DATA_VERSION && Array.isArray(raw.servers) && Array.isArray(raw.projects)) {
+    if (normalizeProjectTargetFields(raw)) saveData(raw);
     return raw;
   }
 
@@ -279,21 +321,23 @@ function getKnownPackZipPaths(project) {
   const dirPath = project?.dirPath;
   const names = new Set();
 
-  const zipPath = String(project?.zipPath || '').trim();
-  if (dirPath && zipPath) {
-    const relativeZipPath = toGitRelativePath(dirPath, zipPath);
-    if (relativeZipPath) names.add(relativeZipPath);
-  }
+  Object.values(project?.packs || {}).forEach((pack) => {
+    const zipPath = String(pack?.zipPath || '').trim();
+    if (dirPath && zipPath) {
+      const relativeZipPath = toGitRelativePath(dirPath, zipPath);
+      if (relativeZipPath) names.add(relativeZipPath);
+    }
 
-  const zipName = String(project?.zipName || '').trim();
-  if (zipName && !zipName.includes('/') && !zipName.includes('\\')) {
-    names.add(zipName);
-  }
+    const zipName = String(pack?.zipName || '').trim();
+    if (zipName && !zipName.includes('/') && !zipName.includes('\\')) {
+      names.add(zipName);
+    }
 
-  const packDirName = String(project?.packDirName || '').trim();
-  if (packDirName && !packDirName.includes('/') && !packDirName.includes('\\')) {
-    names.add(`${packDirName}.zip`);
-  }
+    const packDirName = String(pack?.packDirName || '').trim();
+    if (packDirName && !packDirName.includes('/') && !packDirName.includes('\\')) {
+      names.add(`${packDirName}.zip`);
+    }
+  });
 
   return names;
 }
@@ -646,24 +690,70 @@ app.post('/api/import-json', upload.single('file'), (req, res) => {
 
 function decorateProjectZipInfo(project) {
   const decorated = { ...project };
-  if (decorated.zipPath && fs.existsSync(decorated.zipPath)) {
-    decorated.zipExists = true;
-    decorated.zipSize = (fs.statSync(decorated.zipPath).size / 1024 / 1024).toFixed(2) + ' MB';
-  } else {
-    decorated.zipExists = false;
-    decorated.zipSize = null;
-  }
+  let packedCount = 0;
+  let latest = null;
+  decorated.packs = {};
+  Object.entries(project.packs || {}).forEach(([targetId, pack]) => {
+    const exists = Boolean(pack?.zipPath && fs.existsSync(pack.zipPath));
+    decorated.packs[targetId] = { ...pack, zipExists: exists };
+    if (exists) {
+      packedCount += 1;
+      if (!latest || String(pack.packTime || '') > String(latest.packTime || '')) {
+        latest = {
+          zipPath: pack.zipPath,
+          zipSize: (fs.statSync(pack.zipPath).size / 1024 / 1024).toFixed(2) + ' MB',
+          packTime: pack.packTime || ''
+        };
+      }
+    }
+  });
+  decorated.zipExists = packedCount > 0;
+  decorated.packedCount = packedCount;
+  decorated.zipPath = latest ? latest.zipPath : null;
+  decorated.zipSize = latest ? latest.zipSize : null;
+  decorated.packTime = latest ? latest.packTime : null;
   return decorated;
+}
+
+// 校验并清理 body 中按目标的字段：buildCmds 仅保留有效路径 id 与非空命令；同时清理未关联目标的孤儿产物
+function sanitizeProjectBodyTargetFields(data, body) {
+  if (body.buildCmds && typeof body.buildCmds === 'object' && !Array.isArray(body.buildCmds)) {
+    const knownIds = collectKnownPathIds(data.servers);
+    const cleaned = {};
+    Object.entries(body.buildCmds).forEach(([targetId, cmd]) => {
+      const command = String(cmd || '').trim();
+      if (knownIds.has(targetId) && command) cleaned[targetId] = command;
+    });
+    body.buildCmds = cleaned;
+  } else {
+    delete body.buildCmds;
+  }
+  delete body.packs;
+  delete body.deployStates;
+  return body;
+}
+
+function pruneProjectOrphanTargetFields(project) {
+  const linked = new Set(Array.isArray(project.targetIds) ? project.targetIds : []);
+  ['packs', 'buildCmds'].forEach((field) => {
+    if (project[field] && typeof project[field] === 'object') {
+      Object.keys(project[field]).forEach((targetId) => {
+        if (!linked.has(targetId)) delete project[field][targetId];
+      });
+    }
+  });
 }
 
 app.post('/api/projects', (req, res) => {
   try {
     const data = loadData();
-    const body = { ...req.body };
+    const body = sanitizeProjectBodyTargetFields(data, { ...req.body });
     body.targetIds = sanitizeTargetIds(data.servers, body.targetIds);
     const project = {
       id: uuidv4(),
       ...body,
+      buildCmds: body.buildCmds || {},
+      packs: {},
       deployStates: {},
       createdAt: new Date().toISOString(),
       lastDeployTime: null,
@@ -682,11 +772,20 @@ app.put('/api/projects/:id', (req, res) => {
     const data = loadData();
     const idx = data.projects.findIndex(p => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: '项目不存在' });
-    const body = { ...req.body };
+    const body = sanitizeProjectBodyTargetFields(data, { ...req.body });
     if (Array.isArray(body.targetIds)) {
       body.targetIds = sanitizeTargetIds(data.servers, body.targetIds);
     }
-    data.projects[idx] = { ...data.projects[idx], ...body };
+    const existing = data.projects[idx];
+    const merged = { ...existing, ...body };
+    if (body.buildCmds) {
+      merged.buildCmds = { ...(existing.buildCmds || {}), ...body.buildCmds };
+      Object.keys(merged.buildCmds).forEach((targetId) => {
+        if (!merged.buildCmds[targetId]) delete merged.buildCmds[targetId];
+      });
+    }
+    data.projects[idx] = merged;
+    pruneProjectOrphanTargetFields(data.projects[idx]);
     saveData(data);
     res.json(decorateProjectZipInfo(data.projects[idx]));
   } catch (err) {
@@ -952,21 +1051,7 @@ app.delete('/api/servers/:id/paths/:pathId', (req, res) => {
 app.get('/api/projects', (req, res) => {
   try {
     const projects = loadProjects();
-    projects.forEach(p => {
-      if (p.zipPath) {
-        p.zipExists = fs.existsSync(p.zipPath);
-        if (p.zipExists) {
-          const stat = fs.statSync(p.zipPath);
-          p.zipSize = (stat.size / 1024 / 1024).toFixed(2) + ' MB';
-        } else {
-          p.zipSize = null;
-        }
-      } else {
-        p.zipExists = false;
-        p.zipSize = null;
-      }
-    });
-    res.json(projects);
+    res.json(projects.map(decorateProjectZipInfo));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1016,17 +1101,26 @@ function buildSshConnConfig(deploy) {
   return connConfig;
 }
 
-function resolveProjectDeployFolderName(project) {
-  const packDirName = String(project?.packDirName || '').trim();
+// 线上目录名 = 该目标最近一次打包的产物目录名（决定备份/回滚匹配的目录）
+function resolveProjectDeployFolderName(project, targetId) {
+  const pack = project?.packs?.[targetId];
+  const packDirName = String(pack?.packDirName || '').trim();
   if (packDirName) return packDirName;
 
-  const zipName = String(project?.zipName || '').trim();
+  const zipName = String(pack?.zipName || '').trim();
   if (zipName) return path.basename(zipName, path.extname(zipName));
 
-  const zipPath = String(project?.zipPath || '').trim();
+  const zipPath = String(pack?.zipPath || '').trim();
   if (zipPath) return path.basename(zipPath, path.extname(zipPath));
 
-  return '';
+  return String(project?.projectName || '').trim();
+}
+
+// 某目标的构建命令：目标级覆盖优先，缺省回落项目默认
+function resolveProjectBuildCmd(project, targetId) {
+  const override = String(project?.buildCmds?.[targetId] || '').trim();
+  if (override) return override;
+  return String(project?.buildCmd || '').trim() || 'npm run build';
 }
 
 function escapePosixExtendedRegex(value) {
@@ -1112,21 +1206,29 @@ function execRemoteCommand(conn, command, onLine) {
   });
 }
 
-app.post('/api/pack/:id', (req, res) => {
-  const projects = loadProjects();
-  const project = projects.find(p => p.id === req.params.id);
+app.post('/api/pack/:id', async (req, res) => {
+  const data = loadData();
+  const project = data.projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
   if (!project.dirPath || !fs.existsSync(project.dirPath)) return res.status(400).json({ error: '项目路径不存在' });
+
   const packOptions = req.body && typeof req.body === 'object' ? req.body : {};
   const useAutoStash = Boolean(packOptions.autoStash);
+  const linkedTargetIds = sanitizeTargetIds(data.servers, project.targetIds);
+  const targetIds = Array.isArray(packOptions.targetIds)
+    ? sanitizeTargetIds(data.servers, packOptions.targetIds).filter((id) => linkedTargetIds.includes(id))
+    : linkedTargetIds;
+  if (!targetIds.length) {
+    return res.status(400).json({ error: '该项目尚未关联有效的部署目标，无法打包' });
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = (type, data) => {
-    res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+  const send = (type, payload) => {
+    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
   };
 
   const branchCheck = checkProjectBranch(project);
@@ -1135,11 +1237,6 @@ app.post('/api/pack/:id', (req, res) => {
     return res.end();
   }
   send('log', { text: `分支校验通过: ${branchCheck.currentBranch}` });
-
-  const buildCmd = project.buildCmd || 'npm run build';
-  if (project.zipPath && fs.existsSync(project.zipPath)) {
-    fs.removeSync(project.zipPath);
-  }
 
   let stashState = null;
   if (useAutoStash) {
@@ -1158,7 +1255,7 @@ app.post('/api/pack/:id', (req, res) => {
   }
 
   let ended = false;
-  const finishPack = (type, data) => {
+  const finishPack = (payload) => {
     if (ended) return;
     ended = true;
 
@@ -1176,117 +1273,159 @@ app.post('/api/pack/:id', (req, res) => {
       }
     }
 
-    send(type, data);
+    send('done', payload);
     res.end();
   };
 
-  send('log', { text: `$ ${buildCmd}` });
-  const child = spawn(buildCmd, { cwd: project.dirPath, shell: true });
+  const results = [];
+  for (let index = 0; index < targetIds.length; index++) {
+    const pathId = targetIds[index];
+    const found = findPathById(data.servers, pathId);
+    if (!found) continue;
 
-  child.stdout.on('data', (data) => {
-    data.toString().split('\n').filter(Boolean).forEach(line => send('log', { text: line }));
-  });
-  child.stderr.on('data', (data) => {
-    data.toString().split('\n').filter(Boolean).forEach(line => send('log', { text: line }));
-  });
+    const targetLabel = `${found.server.name} ${found.path.deployPath}`;
+    const buildCmd = resolveProjectBuildCmd(project, pathId);
+    send('log', { text: `── 打包目标 ${index + 1}/${targetIds.length}: ${targetLabel} ──` });
+    send('log', { text: `构建命令: ${buildCmd}` });
 
-  child.on('close', async (code) => {
-    if (code !== 0) {
-      finishPack('error', { text: `构建失败 (exit code ${code})` });
-      return;
-    }
-
-    send('log', { text: '构建完成，检测输出目录...' });
-
-    const startTime = Date.now() - 3600000;
-    const ignoreDirs = new Set(['node_modules', '.git', '.vscode', '.idea']);
-    const preferredOutputDirs = BUILD_OUTPUT_DIRS;
-    const nonOutputLikelyDirs = new Set(['src', 'public', 'docs', 'doc', 'scripts', 'script', 'config', 'configs', 'test', 'tests', '__tests__', 'coverage']);
-
-    const dirEntries = fs.readdirSync(project.dirPath)
-      .map((name) => {
-        if (ignoreDirs.has(name)) return null;
-        const absPath = path.join(project.dirPath, name);
-        try {
-          const stat = fs.statSync(absPath);
-          if (!stat.isDirectory()) return null;
-          return { name, absPath, mtimeMs: stat.mtimeMs };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
-
-    const modifiedDirs = dirEntries.filter((item) => item.mtimeMs >= startTime);
-    const byNewest = (a, b) => b.mtimeMs - a.mtimeMs;
-    const findPreferred = (list) => list
-      .filter((item) => preferredOutputDirs.includes(item.name.toLowerCase()))
-      .sort(byNewest);
-
-    let pickedDir = null;
-
-    const preferredModified = findPreferred(modifiedDirs);
-    if (preferredModified.length) {
-      pickedDir = preferredModified[0];
-    } else if (modifiedDirs.length === 1) {
-      pickedDir = modifiedDirs[0];
-    } else if (modifiedDirs.length > 1) {
-      const likelyOutputDirs = modifiedDirs
-        .filter((item) => !nonOutputLikelyDirs.has(item.name.toLowerCase()))
-        .sort(byNewest);
-      pickedDir = (likelyOutputDirs[0] || modifiedDirs.sort(byNewest)[0]);
-    }
-
-    if (!pickedDir) {
-      const preferredAny = findPreferred(dirEntries);
-      if (preferredAny.length) pickedDir = preferredAny[0];
-    }
-
-    if (!pickedDir) {
-      finishPack('error', { text: '未检测到可打包的构建输出目录' });
-      return;
-    }
-
-    const packDir = pickedDir.absPath;
-    const packDirName = pickedDir.name;
-
-    send('log', { text: `打包目录: ${packDirName}` });
-
-    const zipName = `${packDirName || project.projectName}.zip`;
-    const zipPath = path.join(project.dirPath, zipName);
-
-    try {
-      await new Promise((resolve, reject) => {
-        const output = fs.createWriteStream(zipPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
-        output.on('close', resolve);
-        archive.on('error', reject);
-        archive.pipe(output);
-        archive.directory(packDir, packDirName, (entry) => {
-          if (entry.name.endsWith('.zip') || entry.name === 'node_modules') return false;
-          return entry;
-        });
-        archive.finalize();
-      });
-
-      const stat = fs.statSync(zipPath);
-      const currentData = loadData();
-      const idx = currentData.projects.findIndex(p => p.id === project.id);
-      if (idx !== -1) {
-        currentData.projects[idx].zipPath = zipPath;
-        currentData.projects[idx].zipName = zipName;
-        currentData.projects[idx].packDirName = packDirName;
-        currentData.projects[idx].packTime = new Date().toLocaleString('zh-CN');
-        saveData(currentData);
+    const result = await packProjectForTarget(project, pathId, buildCmd, send);
+    if (result.success) {
+      const current = data.projects.find(p => p.id === project.id);
+      if (current) {
+        current.packs = current.packs && typeof current.packs === 'object' ? current.packs : {};
+        current.packs[pathId] = result.pack;
+        saveData(data);
       }
-
-      send('log', { text: `打包完成: ${zipName} (${(stat.size / 1024 / 1024).toFixed(2)} MB)` });
-      finishPack('done', { success: true });
-    } catch (err) {
-      finishPack('error', { text: '打包失败: ' + err.message });
+      send('log', { text: `目标打包完成: ${result.pack.zipName}` });
+      results.push({ targetId: pathId, label: targetLabel, success: true, zipName: result.pack.zipName, packTime: result.pack.packTime });
+    } else {
+      send('log', { text: `目标打包失败: ${targetLabel}` });
+      send('log', { text: `失败原因: ${result.error}` });
+      results.push({ targetId: pathId, label: targetLabel, success: false, error: result.error });
     }
-  });
+  }
+
+  const successCount = results.filter(item => item.success).length;
+  const failedCount = results.length - successCount;
+  send('log', { text: `打包结束: 成功 ${successCount} 个 / 失败 ${failedCount} 个` });
+  finishPack({ success: failedCount === 0, results, successCount, failedCount });
 });
+
+// 构建输出目录探测：优先最近修改的常见产物目录，其次唯一修改目录
+function detectBuildOutputDir(dirPath) {
+  const startTime = Date.now() - 3600000;
+  const ignoreDirs = new Set(['node_modules', '.git', '.vscode', '.idea']);
+  const preferredOutputDirs = BUILD_OUTPUT_DIRS;
+  const nonOutputLikelyDirs = new Set(['src', 'public', 'docs', 'doc', 'scripts', 'script', 'config', 'configs', 'test', 'tests', '__tests__', 'coverage']);
+
+  const dirEntries = fs.readdirSync(dirPath)
+    .map((name) => {
+      if (ignoreDirs.has(name)) return null;
+      const absPath = path.join(dirPath, name);
+      try {
+        const stat = fs.statSync(absPath);
+        if (!stat.isDirectory()) return null;
+        return { name, absPath, mtimeMs: stat.mtimeMs };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  const modifiedDirs = dirEntries.filter((item) => item.mtimeMs >= startTime);
+  const byNewest = (a, b) => b.mtimeMs - a.mtimeMs;
+  const findPreferred = (list) => list
+    .filter((item) => preferredOutputDirs.includes(item.name.toLowerCase()))
+    .sort(byNewest);
+
+  let pickedDir = null;
+
+  const preferredModified = findPreferred(modifiedDirs);
+  if (preferredModified.length) {
+    pickedDir = preferredModified[0];
+  } else if (modifiedDirs.length === 1) {
+    pickedDir = modifiedDirs[0];
+  } else if (modifiedDirs.length > 1) {
+    const likelyOutputDirs = modifiedDirs
+      .filter((item) => !nonOutputLikelyDirs.has(item.name.toLowerCase()))
+      .sort(byNewest);
+    pickedDir = (likelyOutputDirs[0] || modifiedDirs.sort(byNewest)[0]);
+  }
+
+  if (!pickedDir) {
+    const preferredAny = findPreferred(dirEntries);
+    if (preferredAny.length) pickedDir = preferredAny[0];
+  }
+
+  return pickedDir;
+}
+
+// 单目标打包：执行该目标的构建命令 → 探测输出目录 → 生成该目标专属 zip。结果以 Promise 返回，不抛出。
+async function packProjectForTarget(project, targetId, buildCmd, send) {
+  const oldPack = project.packs?.[targetId];
+  if (oldPack?.zipPath && fs.existsSync(oldPack.zipPath)) {
+    fs.removeSync(oldPack.zipPath);
+  }
+
+  const exitCode = await new Promise((resolve) => {
+    const child = spawn(buildCmd, { cwd: project.dirPath, shell: true });
+    child.stdout.on('data', (chunk) => {
+      chunk.toString().split('\n').filter(Boolean).forEach(line => send('log', { text: line }));
+    });
+    child.stderr.on('data', (chunk) => {
+      chunk.toString().split('\n').filter(Boolean).forEach(line => send('log', { text: line }));
+    });
+    child.on('error', (err) => {
+      send('log', { text: `构建命令启动失败: ${err.message}` });
+      resolve(-1);
+    });
+    child.on('close', (code) => resolve(code));
+  });
+  if (exitCode !== 0) {
+    return { success: false, error: `构建失败 (exit code ${exitCode})` };
+  }
+
+  send('log', { text: '构建完成，检测输出目录...' });
+  const pickedDir = detectBuildOutputDir(project.dirPath);
+  if (!pickedDir) {
+    return { success: false, error: '未检测到可打包的构建输出目录' };
+  }
+
+  const packDirName = pickedDir.name;
+  const shortId = String(targetId).replace(/-/g, '').slice(0, 6);
+  const zipName = `${packDirName || project.projectName}_${shortId}.zip`;
+  const zipPath = path.join(project.dirPath, zipName);
+  send('log', { text: `打包目录: ${packDirName}` });
+
+  try {
+    await new Promise((resolve, reject) => {
+      const output = fs.createWriteStream(zipPath);
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      output.on('close', resolve);
+      archive.on('error', reject);
+      archive.pipe(output);
+      archive.directory(pickedDir.absPath, packDirName, (entry) => {
+        if (entry.name.endsWith('.zip') || entry.name === 'node_modules') return false;
+        return entry;
+      });
+      archive.finalize();
+    });
+
+    const stat = fs.statSync(zipPath);
+    send('log', { text: `压缩完成: ${zipName} (${(stat.size / 1024 / 1024).toFixed(2)} MB)` });
+    return {
+      success: true,
+      pack: {
+        zipPath,
+        zipName,
+        packDirName,
+        packTime: new Date().toLocaleString('zh-CN')
+      }
+    };
+  } catch (err) {
+    return { success: false, error: '打包失败: ' + err.message };
+  }
+}
 
 function formatRemoteTimestamp(now = new Date()) {
   return now.getFullYear().toString() +
@@ -1307,10 +1446,16 @@ function deployProjectToTarget(project, server, pathEntry, send) {
     };
 
     const deployPath = pathEntry.deployPath;
-    const zipPath = project.zipPath;
-    const deployZipName = project.zipName || path.basename(zipPath);
+    const pack = project.packs?.[pathEntry.id];
+    const zipPath = pack?.zipPath || '';
+    const deployZipName = pack?.zipName || path.basename(zipPath);
     const remoteZipPath = `${deployPath}/${deployZipName}`;
-    const zipFolderName = resolveProjectDeployFolderName(project);
+    const zipFolderName = resolveProjectDeployFolderName(project, pathEntry.id);
+
+    if (!zipPath || !fs.existsSync(zipPath)) {
+      resolve({ success: false, error: '该目标尚未打包（请先在“打包”中选择此目标执行构建）' });
+      return;
+    }
 
     const conn = new Client();
     send('log', { text: `连接服务器 ${server.name}（${server.host}:${server.port || 22}）...` });
@@ -1392,8 +1537,19 @@ app.post('/api/deploy/:id', async (req, res) => {
     return res.status(400).json({ error: '该项目尚未关联有效的部署目标' });
   }
 
-  if (!project.zipPath || !fs.existsSync(project.zipPath)) {
-    return res.status(400).json({ error: '请先打包项目' });
+  const unpackedTargets = targetIds.filter((id) => {
+    const zipPath = project.packs?.[id]?.zipPath;
+    return !zipPath || !fs.existsSync(zipPath);
+  });
+  if (unpackedTargets.length === targetIds.length) {
+    return res.status(400).json({ error: '所选目标均未打包，请先在“打包”中选择目标执行构建' });
+  }
+  if (unpackedTargets.length) {
+    const names = unpackedTargets.map((id) => {
+      const found = findPathById(data.servers, id);
+      return found ? `${found.server.name} ${found.path.deployPath}` : id;
+    }).join('； ');
+    return res.status(400).json({ error: `以下目标尚未打包，请先打包后再部署：${names}` });
   }
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1472,7 +1628,7 @@ app.get('/api/list-backups/:id', (req, res) => {
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
   const { project, server, pathEntry } = resolved;
 
-  const backupFolderName = resolveProjectDeployFolderName(project);
+  const backupFolderName = resolveProjectDeployFolderName(project, pathEntry.id);
   if (!backupFolderName) {
     return res.status(400).json({ error: '缺少备份目录名称，请先至少打包一次项目后再试' });
   }
@@ -1518,7 +1674,7 @@ app.post('/api/delete-backups/:id', (req, res) => {
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
   const { project, server, pathEntry } = resolved;
 
-  const backupFolderName = resolveProjectDeployFolderName(project);
+  const backupFolderName = resolveProjectDeployFolderName(project, pathEntry.id);
   if (!backupFolderName) {
     return res.status(400).json({ error: '缺少备份目录名称，请先至少打包一次项目后再试' });
   }
@@ -1622,7 +1778,7 @@ app.post('/api/rollback/:id', (req, res) => {
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
   const { project, server, pathEntry } = resolved;
 
-  const backupFolderName = resolveProjectDeployFolderName(project);
+  const backupFolderName = resolveProjectDeployFolderName(project, pathEntry.id);
   if (!backupFolderName) {
     return res.status(400).json({ error: '缺少部署目录名称，请先至少打包一次项目后再试' });
   }
