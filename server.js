@@ -47,13 +47,141 @@ app.get('/api/_health', (req, res) => {
 
 const upload = multer({ dest: path.join(__dirname, 'temp') });
 
-function loadProjects() {
-  if (!fs.existsSync(DATA_FILE)) return [];
-  return fs.readJsonSync(DATA_FILE);
+const DATA_VERSION = 2;
+const DATA_BACKUP_FILE = path.join(__dirname, 'projects.json.v1.bak');
+
+function createEmptyData() {
+  return { version: DATA_VERSION, servers: [], projects: [] };
 }
 
-function saveProjects(projects) {
-  fs.writeJsonSync(DATA_FILE, projects, { spaces: 2 });
+function getServerMatchKey(host, port, username) {
+  return `${String(host || '').trim().toLowerCase()}|${Number(port) || 22}|${String(username || '').trim().toLowerCase()}`;
+}
+
+// v1（项目数组，deploy 内嵌）→ v2（servers + projects.targetIds 多对多）。
+function migrateV1Projects(rawProjects) {
+  const data = createEmptyData();
+  const serverByKey = new Map();
+
+  rawProjects.forEach((project) => {
+    if (!project || typeof project !== 'object') return;
+    const deploy = project.deploy;
+    delete project.deploy;
+
+    project.targetIds = Array.isArray(project.targetIds) ? project.targetIds : [];
+    project.deployStates = project.deployStates && typeof project.deployStates === 'object'
+      ? project.deployStates
+      : {};
+
+    if (!deploy || !deploy.host || !deploy.username || !deploy.deployPath) {
+      data.projects.push(project);
+      return;
+    }
+
+    const port = Number(deploy.port) || 22;
+    const serverKey = getServerMatchKey(deploy.host, port, deploy.username);
+    let server = serverByKey.get(serverKey);
+    if (!server) {
+      server = {
+        id: uuidv4(),
+        name: String(deploy.host),
+        host: String(deploy.host),
+        port,
+        username: String(deploy.username),
+        password: deploy.password || '',
+        privateKey: deploy.privateKey || '',
+        createdAt: new Date().toISOString(),
+        paths: []
+      };
+      serverByKey.set(serverKey, server);
+      data.servers.push(server);
+    } else if (!server.privateKey && deploy.privateKey) {
+      server.privateKey = deploy.privateKey;
+    } else if (!server.password && deploy.password) {
+      server.password = deploy.password;
+    }
+
+    const deployPath = String(deploy.deployPath);
+    let pathEntry = server.paths.find((item) => item.deployPath === deployPath);
+    if (!pathEntry) {
+      pathEntry = {
+        id: uuidv4(),
+        label: '',
+        deployPath,
+        backupPath: String(deploy.backupPath || ''),
+        createdAt: new Date().toISOString()
+      };
+      server.paths.push(pathEntry);
+    }
+
+    project.targetIds.push(pathEntry.id);
+    project.deployStates[pathEntry.id] = {
+      lastDeployTime: project.lastDeployTime || null,
+      deployStatus: project.deployStatus || '未部署'
+    };
+    data.projects.push(project);
+  });
+
+  return data;
+}
+
+function loadData() {
+  if (!fs.existsSync(DATA_FILE)) return createEmptyData();
+  const raw = fs.readJsonSync(DATA_FILE);
+
+  if (Array.isArray(raw)) {
+    const data = migrateV1Projects(raw);
+    if (!fs.existsSync(DATA_BACKUP_FILE)) {
+      fs.copySync(DATA_FILE, DATA_BACKUP_FILE);
+    }
+    saveData(data);
+    return data;
+  }
+
+  if (raw && raw.version === DATA_VERSION && Array.isArray(raw.servers) && Array.isArray(raw.projects)) {
+    return raw;
+  }
+
+  throw new Error('projects.json 格式无法识别，请检查或删除该文件后重试');
+}
+
+function saveData(data) {
+  fs.writeJsonSync(DATA_FILE, data, { spaces: 2 });
+}
+
+function loadProjects() {
+  return loadData().projects;
+}
+
+function findPathById(servers, pathId) {
+  for (const server of servers) {
+    const pathIndex = (server.paths || []).findIndex((item) => item.id === pathId);
+    if (pathIndex !== -1) {
+      return { server, path: server.paths[pathIndex], pathIndex };
+    }
+  }
+  return null;
+}
+
+function collectKnownPathIds(servers) {
+  const ids = new Set();
+  servers.forEach((server) => {
+    (server.paths || []).forEach((pathEntry) => ids.add(pathEntry.id));
+  });
+  return ids;
+}
+
+function sanitizeTargetIds(servers, targetIds) {
+  if (!Array.isArray(targetIds)) return [];
+  const knownIds = collectKnownPathIds(servers);
+  const result = [];
+  targetIds.forEach((id) => {
+    const normalized = String(id || '').trim();
+    if (normalized && knownIds.has(normalized) && !result.includes(normalized)) {
+      result.push(normalized);
+    }
+  });
+  return result;
 }
 
 function getCurrentGitBranch(dirPath) {
@@ -516,19 +644,34 @@ app.post('/api/import-json', upload.single('file'), (req, res) => {
   }
 });
 
+function decorateProjectZipInfo(project) {
+  const decorated = { ...project };
+  if (decorated.zipPath && fs.existsSync(decorated.zipPath)) {
+    decorated.zipExists = true;
+    decorated.zipSize = (fs.statSync(decorated.zipPath).size / 1024 / 1024).toFixed(2) + ' MB';
+  } else {
+    decorated.zipExists = false;
+    decorated.zipSize = null;
+  }
+  return decorated;
+}
+
 app.post('/api/projects', (req, res) => {
   try {
-    const projects = loadProjects();
+    const data = loadData();
+    const body = { ...req.body };
+    body.targetIds = sanitizeTargetIds(data.servers, body.targetIds);
     const project = {
       id: uuidv4(),
-      ...req.body,
+      ...body,
+      deployStates: {},
       createdAt: new Date().toISOString(),
       lastDeployTime: null,
       deployStatus: '未部署'
     };
-    projects.push(project);
-    saveProjects(projects);
-    res.json(project);
+    data.projects.push(project);
+    saveData(data);
+    res.json(decorateProjectZipInfo(project));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -536,12 +679,16 @@ app.post('/api/projects', (req, res) => {
 
 app.put('/api/projects/:id', (req, res) => {
   try {
-    const projects = loadProjects();
-    const idx = projects.findIndex(p => p.id === req.params.id);
+    const data = loadData();
+    const idx = data.projects.findIndex(p => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: '项目不存在' });
-    projects[idx] = { ...projects[idx], ...req.body };
-    saveProjects(projects);
-    res.json(projects[idx]);
+    const body = { ...req.body };
+    if (Array.isArray(body.targetIds)) {
+      body.targetIds = sanitizeTargetIds(data.servers, body.targetIds);
+    }
+    data.projects[idx] = { ...data.projects[idx], ...body };
+    saveData(data);
+    res.json(decorateProjectZipInfo(data.projects[idx]));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -549,9 +696,253 @@ app.put('/api/projects/:id', (req, res) => {
 
 app.delete('/api/projects/:id', (req, res) => {
   try {
-    let projects = loadProjects();
-    projects = projects.filter(p => p.id !== req.params.id);
-    saveProjects(projects);
+    const data = loadData();
+    data.projects = data.projects.filter(p => p.id !== req.params.id);
+    saveData(data);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function decorateServersWithUsage(data) {
+  const pathUsage = new Map();
+  data.projects.forEach((project) => {
+    (sanitizeTargetIds(data.servers, project.targetIds) || []).forEach((pathId) => {
+      const usage = pathUsage.get(pathId) || { count: 0, projectNames: [] };
+      usage.count += 1;
+      usage.projectNames.push(project.projectName || project.id);
+      pathUsage.set(pathId, usage);
+    });
+  });
+
+  return data.servers.map((server) => {
+    const paths = (server.paths || []).map((pathEntry) => ({
+      ...pathEntry,
+      usedCount: (pathUsage.get(pathEntry.id) || { count: 0 }).count
+    }));
+    const projectCount = new Set(
+      data.projects
+        .filter((project) => (project.targetIds || []).some((id) => server.paths?.some((p) => p.id === id)))
+        .map((project) => project.id)
+    ).size;
+    return { ...server, paths, projectCount };
+  });
+}
+
+function normalizeServerPayload(body) {
+  const name = String(body?.name || '').trim();
+  const host = String(body?.host || '').trim();
+  const username = String(body?.username || '').trim();
+  if (!name) return { error: '请填写服务器名称' };
+  if (!host) return { error: '请填写服务器地址' };
+  if (!username) return { error: '请填写用户名' };
+
+  const password = String(body?.password || '');
+  const privateKey = String(body?.privateKey || '').trim();
+  if (!password && !privateKey) return { error: '请填写密码或私钥' };
+
+  return {
+    value: {
+      name,
+      host,
+      port: Number.parseInt(body?.port, 10) || 22,
+      username,
+      ...(privateKey ? { privateKey } : { password })
+    }
+  };
+}
+
+function normalizePathPayload(body) {
+  const label = String(body?.label || '').trim();
+  const deployPath = String(body?.deployPath || '').trim();
+  const backupPath = String(body?.backupPath || '').trim();
+  if (!deployPath) return { error: '请填写部署路径' };
+  if (!deployPath.startsWith('/')) return { error: '部署路径需以 / 开头的绝对路径' };
+  if (backupPath && !backupPath.startsWith('/')) return { error: '备份路径需以 / 开头的绝对路径' };
+  return { value: { label, deployPath, backupPath } };
+}
+
+app.get('/api/servers', (req, res) => {
+  try {
+    res.json(decorateServersWithUsage(loadData()));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/servers', (req, res) => {
+  try {
+    const parsed = normalizeServerPayload(req.body);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    const data = loadData();
+    const server = {
+      id: uuidv4(),
+      ...parsed.value,
+      createdAt: new Date().toISOString(),
+      paths: []
+    };
+    data.servers.push(server);
+    saveData(data);
+    res.json(server);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/servers/:id', (req, res) => {
+  try {
+    const data = loadData();
+    const idx = data.servers.findIndex(s => s.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: '服务器不存在' });
+
+    const parsed = normalizeServerPayload({ ...data.servers[idx], ...req.body });
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    data.servers[idx] = { ...data.servers[idx], ...parsed.value };
+    saveData(data);
+    res.json(data.servers[idx]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function moveArrayItem(items, id, direction) {
+  const index = items.findIndex((item) => item.id === id);
+  if (index === -1) return { error: '条目不存在', status: 404 };
+  const targetIndex = direction === 'up' ? index - 1 : index + 1;
+  if (targetIndex < 0 || targetIndex >= items.length) {
+    return { error: direction === 'up' ? '已经在最顶部，无法上移' : '已经在最底部，无法下移', status: 400 };
+  }
+  const [item] = items.splice(index, 1);
+  items.splice(targetIndex, 0, item);
+  return { moved: true };
+}
+
+app.post('/api/servers/:id/move', (req, res) => {
+  try {
+    const data = loadData();
+    const server = data.servers.find(s => s.id === req.params.id);
+    if (!server) return res.status(404).json({ error: '服务器不存在' });
+    const direction = req.body?.direction === 'up' ? 'up' : 'down';
+    const result = moveArrayItem(data.servers, server.id, direction);
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    saveData(data);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/servers/:id/paths/:pathId/move', (req, res) => {
+  try {
+    const data = loadData();
+    const server = data.servers.find(s => s.id === req.params.id);
+    if (!server) return res.status(404).json({ error: '服务器不存在' });
+    const direction = req.body?.direction === 'up' ? 'up' : 'down';
+    const result = moveArrayItem(server.paths || [], req.params.pathId, direction);
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    saveData(data);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/servers/:id', (req, res) => {
+  try {
+    const data = loadData();
+    const idx = data.servers.findIndex(s => s.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: '服务器不存在' });
+
+    const referencedPaths = (data.servers[idx].paths || []).filter((pathEntry) =>
+      data.projects.some((project) => (project.targetIds || []).includes(pathEntry.id))
+    );
+    if (referencedPaths.length) {
+      return res.status(400).json({
+        error: `该服务器下有 ${referencedPaths.length} 个部署路径仍被项目引用，请先在项目中解除关联后再删除`
+      });
+    }
+
+    data.servers.splice(idx, 1);
+    saveData(data);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/servers/:id/paths', (req, res) => {
+  try {
+    const data = loadData();
+    const server = data.servers.find(s => s.id === req.params.id);
+    if (!server) return res.status(404).json({ error: '服务器不存在' });
+
+    const parsed = normalizePathPayload(req.body);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    if ((server.paths || []).some((item) => item.deployPath === parsed.value.deployPath)) {
+      return res.status(400).json({ error: '该服务器下已存在相同部署路径' });
+    }
+
+    const pathEntry = {
+      id: uuidv4(),
+      ...parsed.value,
+      createdAt: new Date().toISOString()
+    };
+    server.paths = server.paths || [];
+    server.paths.push(pathEntry);
+    saveData(data);
+    res.json(pathEntry);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/servers/:id/paths/:pathId', (req, res) => {
+  try {
+    const data = loadData();
+    const server = data.servers.find(s => s.id === req.params.id);
+    if (!server) return res.status(404).json({ error: '服务器不存在' });
+
+    const pathIdx = (server.paths || []).findIndex((item) => item.id === req.params.pathId);
+    if (pathIdx === -1) return res.status(404).json({ error: '部署路径不存在' });
+
+    const parsed = normalizePathPayload({ ...server.paths[pathIdx], ...req.body });
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    if ((server.paths || []).some((item, index) => index !== pathIdx && item.deployPath === parsed.value.deployPath)) {
+      return res.status(400).json({ error: '该服务器下已存在相同部署路径' });
+    }
+
+    server.paths[pathIdx] = { ...server.paths[pathIdx], ...parsed.value };
+    saveData(data);
+    res.json(server.paths[pathIdx]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/servers/:id/paths/:pathId', (req, res) => {
+  try {
+    const data = loadData();
+    const server = data.servers.find(s => s.id === req.params.id);
+    if (!server) return res.status(404).json({ error: '服务器不存在' });
+
+    const pathIdx = (server.paths || []).findIndex((item) => item.id === req.params.pathId);
+    if (pathIdx === -1) return res.status(404).json({ error: '部署路径不存在' });
+
+    const referencingProjects = data.projects.filter((project) =>
+      (project.targetIds || []).includes(req.params.pathId)
+    );
+    if (referencingProjects.length) {
+      const names = referencingProjects.map((p) => p.projectName || p.id).slice(0, 5).join('、');
+      return res.status(400).json({
+        error: `该部署路径正被 ${referencingProjects.length} 个项目引用（${names}），请先解除关联`
+      });
+    }
+
+    server.paths.splice(pathIdx, 1);
+    saveData(data);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -559,22 +950,26 @@ app.delete('/api/projects/:id', (req, res) => {
 });
 
 app.get('/api/projects', (req, res) => {
-  const projects = loadProjects();
-  projects.forEach(p => {
-    if (p.zipPath) {
-      p.zipExists = fs.existsSync(p.zipPath);
-      if (p.zipExists) {
-        const stat = fs.statSync(p.zipPath);
-        p.zipSize = (stat.size / 1024 / 1024).toFixed(2) + ' MB';
+  try {
+    const projects = loadProjects();
+    projects.forEach(p => {
+      if (p.zipPath) {
+        p.zipExists = fs.existsSync(p.zipPath);
+        if (p.zipExists) {
+          const stat = fs.statSync(p.zipPath);
+          p.zipSize = (stat.size / 1024 / 1024).toFixed(2) + ' MB';
+        } else {
+          p.zipSize = null;
+        }
       } else {
+        p.zipExists = false;
         p.zipSize = null;
       }
-    } else {
-      p.zipExists = false;
-      p.zipSize = null;
-    }
-  });
-  res.json(projects);
+    });
+    res.json(projects);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/branch-check/:id', (req, res) => {
@@ -875,12 +1270,15 @@ app.post('/api/pack/:id', (req, res) => {
       });
 
       const stat = fs.statSync(zipPath);
-      const idx = projects.findIndex(p => p.id === project.id);
-      projects[idx].zipPath = zipPath;
-      projects[idx].zipName = zipName;
-      projects[idx].packDirName = packDirName;
-      projects[idx].packTime = new Date().toLocaleString('zh-CN');
-      saveProjects(projects);
+      const currentData = loadData();
+      const idx = currentData.projects.findIndex(p => p.id === project.id);
+      if (idx !== -1) {
+        currentData.projects[idx].zipPath = zipPath;
+        currentData.projects[idx].zipName = zipName;
+        currentData.projects[idx].packDirName = packDirName;
+        currentData.projects[idx].packTime = new Date().toLocaleString('zh-CN');
+        saveData(currentData);
+      }
 
       send('log', { text: `打包完成: ${zipName} (${(stat.size / 1024 / 1024).toFixed(2)} MB)` });
       finishPack('done', { success: true });
@@ -890,15 +1288,110 @@ app.post('/api/pack/:id', (req, res) => {
   });
 });
 
-app.post('/api/deploy/:id', (req, res) => {
-  const projects = loadProjects();
-  const project = projects.find(p => p.id === req.params.id);
+function formatRemoteTimestamp(now = new Date()) {
+  return now.getFullYear().toString() +
+    String(now.getMonth() + 1).padStart(2, '0') +
+    String(now.getDate()).padStart(2, '0') +
+    '_' +
+    String(now.getHours()).padStart(2, '0') +
+    String(now.getMinutes()).padStart(2, '0') +
+    String(now.getSeconds()).padStart(2, '0');
+}
+
+// 单目标部署：连接 → SFTP 上传 → 远程备份旧目录 → 解压。结果以 Promise 返回，不抛出。
+function deployProjectToTarget(project, server, pathEntry, send) {
+  return new Promise((resolve) => {
+    const finish = (result) => {
+      try { conn.end(); } catch {}
+      resolve(result);
+    };
+
+    const deployPath = pathEntry.deployPath;
+    const zipPath = project.zipPath;
+    const deployZipName = project.zipName || path.basename(zipPath);
+    const remoteZipPath = `${deployPath}/${deployZipName}`;
+    const zipFolderName = resolveProjectDeployFolderName(project);
+
+    const conn = new Client();
+    send('log', { text: `连接服务器 ${server.name}（${server.host}:${server.port || 22}）...` });
+
+    conn.on('ready', () => {
+      send('log', { text: 'SSH 连接成功' });
+      conn.sftp((err, sftp) => {
+        if (err) return finish({ success: false, error: 'SFTP 连接失败: ' + err.message });
+
+        send('log', { text: `上传 ${deployZipName} -> ${remoteZipPath}` });
+        const localStream = fs.createReadStream(zipPath);
+        const remoteStream = sftp.createWriteStream(remoteZipPath);
+
+        remoteStream.on('close', () => {
+          send('log', { text: '上传完成' });
+
+          if (!zipFolderName) {
+            return finish({ success: false, error: '缺少部署目录名称，请先至少打包一次项目' });
+          }
+
+          const ts = formatRemoteTimestamp();
+          const backupRootPath = String(pathEntry.backupPath || '').trim() || deployPath;
+          const commands = [
+            { cmd: `mkdir -p ${quoteShellArg(backupRootPath)} && cd ${quoteShellArg(deployPath)} && if [ -d ${quoteShellArg(zipFolderName)} ]; then mv ${quoteShellArg(zipFolderName)} ${quoteShellArg(`${backupRootPath}/${zipFolderName}_${ts}`)}; fi`, desc: `备份 ${zipFolderName} -> ${backupRootPath}/${zipFolderName}_${ts}` },
+            { cmd: `unzip -o ${quoteShellArg(remoteZipPath)} -d ${quoteShellArg(deployPath)}`, desc: `解压 ${deployZipName}` }
+          ];
+
+          let cmdIdx = 0;
+          const runNext = () => {
+            if (cmdIdx >= commands.length) {
+              return finish({ success: true, deployTime: new Date().toLocaleString('zh-CN') });
+            }
+
+            const { cmd, desc } = commands[cmdIdx];
+            send('log', { text: `$ ${desc}` });
+            conn.exec(cmd, (err, stream) => {
+              if (err) return finish({ success: false, error: '远程命令执行失败: ' + err.message });
+              let stderr = '';
+              stream.on('data', (data) => {
+                data.toString().split('\n').filter(Boolean).forEach(line => send('log', { text: line }));
+              });
+              stream.stderr.on('data', (data) => { stderr += data; });
+              stream.on('close', (code) => {
+                if (code !== 0) return finish({ success: false, error: `命令执行失败(code ${code}): ${stderr}` });
+                cmdIdx++;
+                runNext();
+              });
+            });
+          };
+          runNext();
+        });
+
+        remoteStream.on('error', (err) => finish({ success: false, error: '上传失败: ' + err.message }));
+        localStream.pipe(remoteStream);
+      });
+    });
+
+    conn.on('error', (err) => finish({ success: false, error: 'SSH 连接失败: ' + err.message }));
+    conn.connect(buildSshConnConfig(server));
+  });
+}
+
+app.post('/api/deploy/:id', async (req, res) => {
+  let data;
+  try {
+    data = loadData();
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  const project = data.projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
 
-  const { deploy } = project;
-  if (!deploy || !deploy.host || !deploy.username || !deploy.deployPath) {
-    return res.status(400).json({ error: '部署信息不完整' });
+  const linkedTargetIds = sanitizeTargetIds(data.servers, project.targetIds);
+  const requestedTargetIds = Array.isArray(req.body?.targetIds)
+    ? sanitizeTargetIds(data.servers, req.body.targetIds)
+    : linkedTargetIds;
+  const targetIds = requestedTargetIds.filter((id) => linkedTargetIds.includes(id));
+  if (!targetIds.length) {
+    return res.status(400).json({ error: '该项目尚未关联有效的部署目标' });
   }
+
   if (!project.zipPath || !fs.existsSync(project.zipPath)) {
     return res.status(400).json({ error: '请先打包项目' });
   }
@@ -908,8 +1401,8 @@ app.post('/api/deploy/:id', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = (type, data) => {
-    res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+  const send = (type, payload) => {
+    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
   };
 
   const branchCheck = checkProjectBranch(project);
@@ -919,120 +1412,84 @@ app.post('/api/deploy/:id', (req, res) => {
   }
   send('log', { text: `分支校验通过: ${branchCheck.currentBranch}` });
 
-  let responded = false;
-  const done = (err, data) => {
-    if (responded) return;
-    responded = true;
-    try { conn.end(); } catch {}
-    if (err) send('error', { text: err });
-    else send('done', data);
-    res.end();
-  };
+  const results = [];
+  for (let index = 0; index < targetIds.length; index++) {
+    const pathId = targetIds[index];
+    const found = findPathById(data.servers, pathId);
+    if (!found) continue;
 
-  const zipPath = project.zipPath;
-  const deployZipName = project.zipName || path.basename(zipPath);
-  send('log', { text: `连接服务器 ${deploy.host}:${deploy.port || 22} ...` });
+    const { server, path: pathEntry } = found;
+    const targetLabel = `${server.name} ${pathEntry.deployPath}`;
+    send('log', { text: `── 目标 ${index + 1}/${targetIds.length}: ${targetLabel} ──` });
 
-  const conn = new Client();
-  conn.on('ready', () => {
-    send('log', { text: 'SSH 连接成功' });
-    conn.sftp((err, sftp) => {
-      if (err) return done('SFTP 连接失败: ' + err.message);
+    const result = await deployProjectToTarget(project, server, pathEntry, send);
+    if (result.success) {
+      const deployTime = result.deployTime;
+      send('log', { text: `目标部署成功: ${targetLabel}` });
 
-      const remoteZipPath = `${deploy.deployPath}/${deployZipName}`;
-      send('log', { text: `上传 ${deployZipName} -> ${remoteZipPath}` });
+      const current = data.projects.find(p => p.id === project.id);
+      if (current) {
+        current.deployStates = current.deployStates && typeof current.deployStates === 'object'
+          ? current.deployStates
+          : {};
+        current.deployStates[pathId] = { lastDeployTime: deployTime, deployStatus: '已部署' };
+        current.lastDeployTime = deployTime;
+        current.deployStatus = '已部署';
+        saveData(data);
+      }
+      results.push({ targetId: pathId, label: targetLabel, success: true, deployTime });
+    } else {
+      send('log', { text: `目标部署失败: ${targetLabel}` });
+      send('log', { text: `失败原因: ${result.error}` });
+      results.push({ targetId: pathId, label: targetLabel, success: false, error: result.error });
+    }
+  }
 
-      const localStream = fs.createReadStream(zipPath);
-      const remoteStream = sftp.createWriteStream(remoteZipPath);
-
-      remoteStream.on('close', () => {
-        send('log', { text: '上传完成' });
-
-        const now = new Date();
-        const ts = now.getFullYear().toString() +
-          String(now.getMonth() + 1).padStart(2, '0') +
-          String(now.getDate()).padStart(2, '0') +
-          '_' +
-          String(now.getHours()).padStart(2, '0') +
-          String(now.getMinutes()).padStart(2, '0') +
-          String(now.getSeconds()).padStart(2, '0');
-
-        const zipFolderName = resolveProjectDeployFolderName(project);
-        const commands = [
-          { cmd: `cd "${deploy.deployPath}" && if [ -d "${zipFolderName}" ]; then mv "${zipFolderName}" "${zipFolderName}_${ts}"; fi`, desc: `备份 ${zipFolderName} -> ${zipFolderName}_${ts}` },
-          { cmd: `unzip -o "${remoteZipPath}" -d "${deploy.deployPath}"`, desc: `解压 ${deployZipName}` }
-        ];
-
-        let cmdIdx = 0;
-        const runNext = () => {
-          if (cmdIdx >= commands.length) {
-            const deployTime = new Date().toLocaleString('zh-CN');
-            const idx = projects.findIndex(p => p.id === project.id);
-            if (idx !== -1) {
-              projects[idx].lastDeployTime = deployTime;
-              projects[idx].deployStatus = '已部署';
-              saveProjects(projects);
-            }
-            return done(null, { success: true, deployTime });
-          }
-
-          const { cmd, desc } = commands[cmdIdx];
-          send('log', { text: `$ ${desc}` });
-          conn.exec(cmd, (err, stream) => {
-            if (err) return done('远程命令执行失败: ' + err.message);
-            let stderr = '';
-            stream.on('data', (data) => {
-              data.toString().split('\n').filter(Boolean).forEach(line => send('log', { text: line }));
-            });
-            stream.stderr.on('data', (data) => { stderr += data; });
-            stream.on('close', (code) => {
-              if (code !== 0) return done(`命令执行失败(code ${code}): ${stderr}`);
-              cmdIdx++;
-              runNext();
-            });
-          });
-        };
-        runNext();
-      });
-
-      remoteStream.on('error', (err) => done('上传失败: ' + err.message));
-      localStream.pipe(remoteStream);
-    });
-  });
-
-  conn.on('error', (err) => done('SSH 连接失败: ' + err.message));
-
-  conn.connect(buildSshConnConfig(deploy));
+  const successCount = results.filter(item => item.success).length;
+  const failedCount = results.length - successCount;
+  send('log', { text: `部署结束: 成功 ${successCount} 个 / 失败 ${failedCount} 个` });
+  send('done', { success: failedCount === 0, results, successCount, failedCount });
+  res.end();
 });
 
-app.get('/api/list-backups/:id', (req, res) => {
-  const projects = loadProjects();
-  const project = projects.find(p => p.id === req.params.id);
-  if (!project) return res.status(404).json({ error: '项目不存在' });
+function resolveProjectTarget(data, projectId, targetId) {
+  const project = data.projects.find(p => p.id === projectId);
+  if (!project) return { error: '项目不存在', status: 404 };
 
-  const { deploy } = project;
-  if (!deploy || !deploy.host || !deploy.username || !deploy.deployPath) {
-    return res.status(400).json({ error: '部署信息不完整' });
+  const linkedTargetIds = sanitizeTargetIds(data.servers, project.targetIds);
+  if (!targetId || !linkedTargetIds.includes(targetId)) {
+    return { error: '部署目标无效或未与该项目关联', status: 400 };
   }
+
+  const found = findPathById(data.servers, targetId);
+  if (!found) return { error: '部署目标不存在', status: 400 };
+  return { project, server: found.server, pathEntry: found.path };
+}
+
+app.get('/api/list-backups/:id', (req, res) => {
+  const data = loadData();
+  const resolved = resolveProjectTarget(data, req.params.id, String(req.query.targetId || ''));
+  if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+  const { project, server, pathEntry } = resolved;
 
   const backupFolderName = resolveProjectDeployFolderName(project);
   if (!backupFolderName) {
     return res.status(400).json({ error: '缺少备份目录名称，请先至少打包一次项目后再试' });
   }
 
-  const backupRootPath = String(deploy.backupPath || deploy.deployPath || '').trim();
+  const backupRootPath = String(pathEntry.backupPath || pathEntry.deployPath || '').trim();
   if (!backupRootPath) {
     return res.status(400).json({ error: '备份目录为空，无法读取列表' });
   }
 
   let responded = false;
   const conn = new Client();
-  const done = (err, data) => {
+  const done = (err, payload) => {
     if (responded) return;
     responded = true;
     try { conn.end(); } catch {}
     if (err) res.status(500).json({ error: err });
-    else res.json(data);
+    else res.json(payload);
   };
 
   conn.on('ready', async () => {
@@ -1052,25 +1509,21 @@ app.get('/api/list-backups/:id', (req, res) => {
 
   conn.on('error', (err) => done('SSH 连接失败: ' + err.message));
 
-  conn.connect(buildSshConnConfig(deploy));
+  conn.connect(buildSshConnConfig(server));
 });
 
 app.post('/api/delete-backups/:id', (req, res) => {
-  const projects = loadProjects();
-  const project = projects.find(p => p.id === req.params.id);
-  if (!project) return res.status(404).json({ error: '项目不存在' });
-
-  const { deploy } = project;
-  if (!deploy || !deploy.host || !deploy.username || !deploy.deployPath) {
-    return res.status(400).json({ error: '部署信息不完整' });
-  }
+  const data = loadData();
+  const resolved = resolveProjectTarget(data, req.params.id, String(req.body?.targetId || ''));
+  if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+  const { project, server, pathEntry } = resolved;
 
   const backupFolderName = resolveProjectDeployFolderName(project);
   if (!backupFolderName) {
     return res.status(400).json({ error: '缺少备份目录名称，请先至少打包一次项目后再试' });
   }
 
-  const backupRootPath = String(deploy.backupPath || deploy.deployPath || '').trim();
+  const backupRootPath = String(pathEntry.backupPath || pathEntry.deployPath || '').trim();
   if (!backupRootPath) {
     return res.status(400).json({ error: '备份目录为空，无法执行删除' });
   }
@@ -1094,22 +1547,22 @@ app.post('/api/delete-backups/:id', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = (type, data) => {
-    res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+  const send = (type, payload) => {
+    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
   };
 
   let responded = false;
   const conn = new Client();
-  const done = (err, data) => {
+  const done = (err, payload) => {
     if (responded) return;
     responded = true;
     try { conn.end(); } catch {}
     if (err) send('error', { text: err });
-    else send('done', data);
+    else send('done', payload);
     res.end();
   };
 
-  send('log', { text: `连接服务器 ${deploy.host}:${deploy.port || 22} ...` });
+  send('log', { text: `连接服务器 ${server.name}（${server.host}:${server.port || 22}）...` });
 
   conn.on('ready', async () => {
     send('log', { text: 'SSH 连接成功' });
@@ -1160,7 +1613,92 @@ app.post('/api/delete-backups/:id', (req, res) => {
 
   conn.on('error', (err) => done('SSH 连接失败: ' + err.message));
 
-  conn.connect(buildSshConnConfig(deploy));
+  conn.connect(buildSshConnConfig(server));
+});
+
+app.post('/api/rollback/:id', (req, res) => {
+  const data = loadData();
+  const resolved = resolveProjectTarget(data, req.params.id, String(req.body?.targetId || ''));
+  if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+  const { project, server, pathEntry } = resolved;
+
+  const backupFolderName = resolveProjectDeployFolderName(project);
+  if (!backupFolderName) {
+    return res.status(400).json({ error: '缺少部署目录名称，请先至少打包一次项目后再试' });
+  }
+
+  const requestedDirectory = String(req.body?.directory || '').trim().replace(/^\.\//, '');
+  const namePattern = buildBackupDirectoryNamePattern(backupFolderName);
+  if (!requestedDirectory || !namePattern.test(requestedDirectory) || requestedDirectory.includes('/') || requestedDirectory.includes('\\')) {
+    return res.status(400).json({ error: `备份目录名不合法: ${requestedDirectory || '(空)'}` });
+  }
+
+  const deployPath = String(pathEntry.deployPath || '').trim();
+  const backupRootPath = String(pathEntry.backupPath || pathEntry.deployPath || '').trim();
+  if (!deployPath || !backupRootPath) {
+    return res.status(400).json({ error: '部署路径为空，无法回滚' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (type, payload) => {
+    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`);
+  };
+
+  let responded = false;
+  const conn = new Client();
+  const done = (err, payload) => {
+    if (responded) return;
+    responded = true;
+    try { conn.end(); } catch {}
+    if (err) send('error', { text: err });
+    else send('done', payload);
+    res.end();
+  };
+
+  send('log', { text: `连接服务器 ${server.name}（${server.host}:${server.port || 22}）...` });
+
+  conn.on('ready', async () => {
+    send('log', { text: 'SSH 连接成功' });
+    send('log', { text: `目标：${deployPath}/${backupFolderName}` });
+    send('log', { text: `备份目录：${backupRootPath}` });
+
+    try {
+      send('log', { text: `$ 复核备份目录 ${requestedDirectory}` });
+      await execRemoteCommand(conn, `cd ${quoteShellArg(backupRootPath)} && test -d ${quoteShellArg(`./${requestedDirectory}`)}`);
+
+      const stampName = `${backupFolderName}_${formatRemoteTimestamp()}`;
+      send('log', { text: `$ 保存当前线上目录为新备份 ${stampName}` });
+      await execRemoteCommand(conn, `mkdir -p ${quoteShellArg(backupRootPath)} && cd ${quoteShellArg(deployPath)} && if [ -d ${quoteShellArg(backupFolderName)} ]; then mv ${quoteShellArg(backupFolderName)} ${quoteShellArg(`${backupRootPath}/${stampName}`)}; fi`);
+
+      send('log', { text: `$ 恢复备份 ${requestedDirectory} 为线上目录` });
+      await execRemoteCommand(conn, `cd ${quoteShellArg(backupRootPath)} && cp -a ${quoteShellArg(`./${requestedDirectory}`)} ${quoteShellArg(`${deployPath}/${backupFolderName}`)}`);
+
+      const rollbackTime = new Date().toLocaleString('zh-CN');
+      const current = data.projects.find(p => p.id === project.id);
+      if (current) {
+        current.deployStates = current.deployStates && typeof current.deployStates === 'object'
+          ? current.deployStates
+          : {};
+        current.deployStates[pathEntry.id] = { lastDeployTime: rollbackTime, deployStatus: '已回滚' };
+        current.lastDeployTime = rollbackTime;
+        current.deployStatus = '已回滚';
+        saveData(data);
+      }
+
+      send('log', { text: `回滚完成: ${requestedDirectory} 已恢复为线上目录（所选备份已保留）` });
+      done(null, { success: true, rollbackTime, restoredDirectory: requestedDirectory });
+    } catch (err) {
+      done(err.message || '回滚失败');
+    }
+  });
+
+  conn.on('error', (err) => done('SSH 连接失败: ' + err.message));
+
+  conn.connect(buildSshConnConfig(server));
 });
 
 app.post('/api/open-folder', (req, res) => {

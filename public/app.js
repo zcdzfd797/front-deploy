@@ -1,7 +1,13 @@
 ﻿let projects = [];
+let servers = [];
+let activeView = "projects";
 let currentEditId = null;
-let currentEditBackupPath = "";
+let currentEditTargetIds = [];
 let backupSelectorState = null;
+let targetPickerState = null;
+let targetPickerResolver = null;
+let serverModalState = { mode: "list", editingServerId: null, editingPathId: null };
+let serverFormImportedPath = "";
 let parsedGitInfo = null;
 let projectSearchKeyword = "";
 let projectDeployFilter = "all";
@@ -324,10 +330,63 @@ function getBackupFolderBaseName(project) {
   return fileName.replace(/\.zip$/i, "");
 }
 
-function getBackupRootPath(project) {
-  const backupPath = String(project?.deploy?.backupPath || "").trim();
-  if (backupPath) return backupPath;
-  return String(project?.deploy?.deployPath || "").trim();
+function findPathById(pathId) {
+  const normalized = String(pathId || "");
+  if (!normalized) return null;
+  for (const server of servers) {
+    const pathEntry = (server.paths || []).find((item) => item.id === normalized);
+    if (pathEntry) return { server, path: pathEntry };
+  }
+  return null;
+}
+
+function getProjectTargets(project) {
+  const ids = Array.isArray(project?.targetIds) ? project.targetIds : [];
+  const result = [];
+  ids.forEach((pathId) => {
+    const found = findPathById(pathId);
+    if (found) result.push(found);
+  });
+  return result;
+}
+
+function getTargetLabel(server, pathEntry) {
+  const label = String(pathEntry?.label || "").trim();
+  return label ? `${safeText(server?.name)} · ${label}` : safeText(server?.name);
+}
+
+function getTargetDeployState(project, pathId) {
+  const states = project?.deployStates;
+  return (states && typeof states === "object" && states[pathId]) || null;
+}
+
+function isTargetDeployed(project, pathId) {
+  const state = getTargetDeployState(project, pathId);
+  if (!state) return false;
+  if (state.lastDeployTime) return true;
+  return typeof state.deployStatus === "string" && state.deployStatus.includes("已");
+}
+
+function getPathUsage(pathId) {
+  return projects.filter((project) => (Array.isArray(project.targetIds) ? project.targetIds : []).includes(pathId));
+}
+
+function getProjectLinkedServers(project) {
+  const seen = new Set();
+  const result = [];
+  getProjectTargets(project).forEach(({ server }) => {
+    if (seen.has(server.id)) return;
+    seen.add(server.id);
+    result.push(server);
+  });
+  return result;
+}
+
+function hasServerAuth(server) {
+  return Boolean(
+    server &&
+    (String(server.password || "").trim() || String(server.privateKey || "").trim())
+  );
 }
 
 function getRecentDirs() {
@@ -383,32 +442,19 @@ function rememberDir(dirPath) {
   renderRecentDirOptions();
 }
 
-function isDeployed(project) {
-  if (!project) return false;
-  if (project.lastDeployTime) return true;
-  return typeof project.deployStatus === "string" && project.deployStatus.includes("已");
-}
-
 function hasDeployConfig(project) {
-  const deploy = project?.deploy;
-  if (!deploy) return false;
-  return Boolean(deploy.host && deploy.username && deploy.deployPath);
-}
-
-function hasDeployAuth(project) {
-  const deploy = project?.deploy;
-  if (!deploy) return false;
-  return Boolean(
-    String(deploy.password || "").trim() ||
-    String(deploy.privateKey || "").trim()
-  );
+  return getProjectTargets(project).length > 0;
 }
 
 function getProjectRuntimeStatus(project) {
   const branchReady = Boolean(String(project?.branch || "").trim());
   const zipExists = Boolean(project?.zipExists && project?.zipPath);
-  const deployConfigured = hasDeployConfig(project);
-  const deployed = isDeployed(project);
+  const targets = getProjectTargets(project);
+  const targetCount = targets.length;
+  const deployConfigured = targetCount > 0;
+  const deployedCount = targets.filter((item) => isTargetDeployed(project, item.path.id)).length;
+  const deployed = deployedCount > 0;
+  const fullyDeployed = targetCount > 0 && deployedCount === targetCount;
   const deployReady = branchReady && zipExists && deployConfigured;
   const needsConfig = !branchReady || !deployConfigured;
   return {
@@ -416,6 +462,9 @@ function getProjectRuntimeStatus(project) {
     zipExists,
     deployConfigured,
     deployed,
+    fullyDeployed,
+    deployedCount,
+    targetCount,
     deployReady,
     needsConfig
   };
@@ -424,6 +473,9 @@ function getProjectRuntimeStatus(project) {
 function matchesProjectKeyword(project, keyword) {
   if (!keyword) return true;
   const normalizedKeyword = keyword.toLowerCase();
+  const targetText = getProjectTargets(project).map(({ server, path }) => (
+    [safeText(server?.name, ""), safeText(path?.label, ""), safeText(path?.deployPath, "")].join(" ")
+  )).join(" ");
   const text = [
     safeText(project.projectName, ""),
     safeText(project.groupName, ""),
@@ -431,7 +483,8 @@ function matchesProjectKeyword(project, keyword) {
     safeText(project.commitHash, ""),
     safeText(project.commitMsg, ""),
     safeText(project.remark, ""),
-    safeText(project.dirPath, "")
+    safeText(project.dirPath, ""),
+    targetText
   ].join(" ").toLowerCase();
   return text.includes(normalizedKeyword);
 }
@@ -486,6 +539,24 @@ function updateConsoleSummary({ total, visible, groupName }) {
   if (totalEl) totalEl.textContent = String(total);
   if (visibleEl) visibleEl.textContent = String(visible);
   if (groupEl) groupEl.textContent = groupName || "全部";
+  updateConsoleSummaryScope();
+}
+
+function updateConsoleSummaryScope() {
+  const kicker = byId("summaryScopeKicker");
+  const label = byId("summaryScopeLabel");
+  const groupEl = byId("summaryGroupName");
+  if (!kicker || !label) return;
+
+  if (activeView === "targets") {
+    const pathCount = servers.reduce((sum, server) => sum + ((server.paths || []).length), 0);
+    kicker.textContent = "PATHS";
+    label.textContent = "部署路径总数";
+    if (groupEl) groupEl.textContent = String(pathCount);
+  } else {
+    kicker.textContent = "GROUP";
+    label.textContent = "当前分组";
+  }
 }
 
 function clearProjectFilters({ rerender = true } = {}) {
@@ -565,6 +636,11 @@ function renderList() {
   renderGroupNameOptions();
   syncProjectFilterControls();
 
+  if (activeView === "targets") {
+    renderTargetView();
+    return;
+  }
+
   const currentGroupLabel = activeGroupKey === GROUP_ALL_KEY ? "全部项目" : activeGroupKey;
 
   if (!projects.length) {
@@ -629,39 +705,40 @@ function renderList() {
       const deployTip = !runtime.branchReady
         ? "记录分支为空，请先编辑项目并填写分支"
         : (!runtime.deployConfigured
-          ? "请先配置部署信息"
+          ? "请先关联部署目标"
           : (!runtime.zipExists ? "请先打包项目" : ""));
       const gitRefreshReady = Boolean(String(project.dirPath || "").trim());
       const gitRefreshTip = gitRefreshReady ? "" : "项目路径为空，无法刷新 Git";
-      const connAuthReady = hasDeployAuth(project);
-      const connTestReady = runtime.deployConfigured && connAuthReady;
-      const connTestTip = !runtime.deployConfigured
-        ? "请先配置部署信息"
-        : (!connAuthReady ? "请先配置密码或私钥" : "");
+      const linkedServers = getProjectLinkedServers(project);
+      const connAuthReady = linkedServers.length > 0 && linkedServers.every(hasServerAuth);
+      const connTestReady = linkedServers.length > 0 && connAuthReady;
+      const connTestTip = !linkedServers.length
+        ? "请先关联部署目标"
+        : (!connAuthReady ? "关联的服务器缺少密码或私钥，请在服务器管理中补全" : "");
 
-      const lifecycleClass = runtime.deployed
-        ? "is-deployed"
-        : (runtime.deployReady ? "is-ready" : (runtime.needsConfig ? "is-pending" : "is-waiting"));
-      const lifecycleText = runtime.deployed
-        ? "已部署"
-        : (runtime.deployReady ? "可部署" : (runtime.needsConfig ? "待补配置" : "待打包"));
+      const lifecycleClass = !runtime.deployConfigured || runtime.needsConfig
+        ? "is-pending"
+        : (runtime.fullyDeployed
+          ? "is-deployed"
+          : (runtime.deployed ? "is-partial" : (runtime.deployReady ? "is-ready" : "is-waiting")));
+      const lifecycleText = !runtime.deployConfigured || runtime.needsConfig
+        ? "待补配置"
+        : (runtime.fullyDeployed
+          ? "已部署"
+          : (runtime.deployed ? "部分部署" : (runtime.deployReady ? "可部署" : "待打包")));
 
       const healthTips = [];
       if (!runtime.branchReady) healthTips.push("未记录分支");
-      if (!runtime.deployConfigured) healthTips.push("缺少部署配置");
+      if (!runtime.deployConfigured) healthTips.push("未关联部署目标");
       if (!runtime.zipExists) healthTips.push("还未生成压缩包");
-      const healthText = healthTips.length ? healthTips.join(" · ") : "配置完整，可直接执行部署";
+      const healthText = healthTips.length ? healthTips.join(" · ") : `已关联 ${runtime.targetCount} 个部署目标`;
       const healthClass = healthTips.length ? "warn" : "ok";
 
-      const statusText = runtime.deployed ? "已部署" : "未部署";
-      const statusClass = runtime.deployed ? "success" : "";
       const backupFolderBaseName = getBackupFolderBaseName(project);
       const backupDeleteTip = !runtime.deployConfigured
-        ? "请先配置部署信息"
-        : (!connAuthReady
-          ? "请先配置密码或私钥"
-          : (!backupFolderBaseName ? "缺少备份目录名称，请先至少打包一次项目" : ""));
-      const backupDeleteReady = runtime.deployConfigured && connAuthReady && Boolean(backupFolderBaseName);
+        ? "请先关联部署目标"
+        : (!backupFolderBaseName ? "缺少备份目录名称，请先至少打包一次项目" : "");
+      const backupDeleteReady = runtime.deployConfigured && Boolean(backupFolderBaseName);
 
       return `
       <article class="project-card" data-id="${projectId}">
@@ -687,7 +764,7 @@ function renderList() {
             <div class="card-meta secondary">
               <span>访问地址：${accessUrlHtml}</span>
             </div>
-            ${remark ? `<div class="card-meta secondary"><span>备注：${escapeHtml(remark)}</span></div>` : ""}
+            ${remark ? `<div class="card-meta secondary"><span class="card-remark">备注：${escapeHtml(remark)}</span></div>` : ""}
             <div class="card-meta secondary"><span>构建命令：${buildCmd}</span></div>
             ${runtime.zipExists ? `
               <div class="card-meta secondary">
@@ -766,13 +843,45 @@ function renderList() {
           </div>
         </div>
 
-        ${runtime.deployConfigured ? `
-        <div class="card-deploy-info">
-          <span>服务器：${escapeHtml(safeText(project.deploy.host))}:${escapeHtml(safeText(project.deploy.port, 22))}</span>
-          <span>部署路径：${escapeHtml(safeText(project.deploy.deployPath))}</span>
-          <span>状态：<span class="status ${statusClass}">${statusText}</span></span>
+        ${(() => {
+          const targets = getProjectTargets(project);
+          if (!targets.length) {
+            return `
+        <div class="card-targets">
+          <span class="card-targets-empty">未关联部署目标，点击“编辑项目”进行关联</span>
         </div>
-        ` : ""}
+            `;
+          }
+          const chips = targets.map(({ server, path: pathEntry }) => {
+            const deployedFlag = isTargetDeployed(project, pathEntry.id);
+            const state = getTargetDeployState(project, pathEntry.id);
+            const chipTitle = deployedFlag
+              ? `已部署 ${safeText(state?.lastDeployTime, "")}，点击再次部署到该目标`
+              : "该目标尚未部署，点击部署到该目标";
+            return `
+            <button
+              class="target-chip"
+              type="button"
+              data-target-deploy="${escapeHtml(pathEntry.id)}"
+              data-id="${projectId}"
+              data-name="${projectName}"
+              title="${escapeHtml(`${getTargetLabel(server, pathEntry)} ${pathEntry.deployPath} · ${chipTitle}`)}"
+              aria-label="部署 ${projectName} 到 ${escapeHtml(getTargetLabel(server, pathEntry))}"
+              ${runtime.deployReady ? "" : "disabled"}
+            >
+              <span class="target-chip-status ${deployedFlag ? "deployed" : ""}" aria-hidden="true"></span>
+              <span class="target-chip-name">${escapeHtml(safeText(server.name))}</span>
+              <span class="target-chip-path">${escapeHtml(safeText(pathEntry.deployPath))}</span>
+            </button>
+            `;
+          }).join("");
+          return `
+        <div class="card-targets">
+          <span class="card-targets-label">部署目标（${runtime.deployedCount}/${runtime.targetCount} 已部署）</span>
+          <div class="card-target-chips">${chips}</div>
+        </div>
+          `;
+        })()}
         <div class="card-danger-zone">
           <span class="card-danger-label">危险操作</span>
           <div class="card-danger-actions">
@@ -783,8 +892,8 @@ function renderList() {
               data-name="${projectName}"
               ${backupDeleteReady ? "" : "disabled"}
               ${backupDeleteTip ? `title="${backupDeleteTip}"` : ""}
-              aria-label="批量删除 ${projectName} 的备份文件夹"
-            >批量删备份</button>
+              aria-label="管理 ${projectName} 的备份（回滚 / 删除）"
+            >备份管理</button>
             <button
               class="btn btn-sm btn-danger btn-delete"
               type="button"
@@ -800,6 +909,97 @@ function renderList() {
     .join("");
 
   list.innerHTML = html;
+  updateEditingCardHighlight();
+}
+
+function renderTargetView() {
+  const list = byId("projectList");
+  const empty = byId("emptyState");
+
+  const visibleProjects = applyProjectViewFilters(getFilteredProjects());
+  updateProjectFilterResult(getFilteredProjects().length, visibleProjects.length);
+  updateConsoleSummary({
+    total: projects.length,
+    visible: visibleProjects.length,
+    groupName: ""
+  });
+
+  const groupsHtml = [];
+  servers.forEach((server) => {
+    (server.paths || []).forEach((pathEntry) => {
+      const rows = visibleProjects.filter((project) =>
+        (Array.isArray(project.targetIds) ? project.targetIds : []).includes(pathEntry.id)
+      );
+      if (!rows.length) return;
+
+      const rowHtml = rows.map((project) => {
+        const runtime = getProjectRuntimeStatus(project);
+        const deployedFlag = isTargetDeployed(project, pathEntry.id);
+        const state = getTargetDeployState(project, pathEntry.id);
+        const deployTitle = !runtime.branchReady
+          ? "记录分支为空，请先编辑项目并填写分支"
+          : (!runtime.zipExists ? "请先打包项目" : `部署 ${safeText(project.projectName)} 到该目标`);
+        return `
+          <div class="target-project-row">
+            <span class="target-project-name">${escapeHtml(safeText(project.projectName))}</span>
+            <span class="target-project-meta">
+              <span class="badge group">${escapeHtml(normalizeGroupName(project.groupName))}</span>
+              <span class="badge">${escapeHtml(runtime.branchReady ? safeText(project.branch) : "未记录分支")}</span>
+              ${runtime.zipExists ? `<span>已打包</span>` : `<span>未打包</span>`}
+            </span>
+            <span class="target-project-status">
+              <span class="status ${deployedFlag ? "success" : ""}">${deployedFlag ? "已部署" : "未部署"}</span>
+              ${deployedFlag && state?.lastDeployTime ? `<span>${escapeHtml(safeText(state.lastDeployTime))}</span>` : ""}
+              <button
+                class="btn btn-xs btn-primary btn-deploy-target"
+                type="button"
+                data-target-deploy="${escapeHtml(pathEntry.id)}"
+                data-id="${escapeHtml(project.id)}"
+                data-name="${escapeHtml(safeText(project.projectName))}"
+                ${runtime.branchReady && runtime.zipExists ? "" : "disabled"}
+                ${deployTitle ? `title="${escapeHtml(deployTitle)}"` : ""}
+                aria-label="部署 ${escapeHtml(safeText(project.projectName))} 到 ${escapeHtml(getTargetLabel(server, pathEntry))}"
+              >部署到此</button>
+            </span>
+          </div>
+        `;
+      }).join("");
+
+      groupsHtml.push(`
+        <section class="target-group" data-server-id="${escapeHtml(server.id)}" data-path-id="${escapeHtml(pathEntry.id)}">
+          <header class="target-group-head">
+            <span class="target-group-title">${escapeHtml(safeText(server.name))}</span>
+            <span class="target-group-path" title="${escapeHtml(safeText(server.host))}:${escapeHtml(safeText(server.port, 22))} ${escapeHtml(safeText(pathEntry.deployPath))}">${escapeHtml(safeText(server.host))}:${escapeHtml(safeText(server.port, 22))} · ${escapeHtml(safeText(pathEntry.deployPath))}</span>
+            ${String(pathEntry.label || "").trim() ? `<span class="badge">${escapeHtml(safeText(pathEntry.label))}</span>` : ""}
+            <span class="target-group-count">${rows.length} 个项目</span>
+            <div class="target-group-actions">
+              <button
+                class="btn btn-xs btn-secondary btn-test-server-conn"
+                type="button"
+                data-server-id="${escapeHtml(server.id)}"
+                data-server-name="${escapeHtml(safeText(server.name))}"
+                aria-label="测试 ${escapeHtml(safeText(server.name))} 的连接"
+              >测试连接</button>
+            </div>
+          </header>
+          ${rowHtml}
+        </section>
+      `);
+    });
+  });
+
+  if (!groupsHtml.length) {
+    const hasServers = servers.some((server) => (server.paths || []).length);
+    empty.innerHTML = !hasServers
+      ? `<p>暂无服务器与部署路径，请先在左下角“服务器管理”中创建，并在项目中关联目标。</p>`
+      : `<p>当前筛选条件下没有项目与目标关联。</p>`;
+    empty.style.display = "";
+    list.innerHTML = "";
+    return;
+  }
+
+  empty.style.display = "none";
+  list.innerHTML = groupsHtml.join("");
   updateEditingCardHighlight();
 }
 
@@ -919,6 +1119,10 @@ $$(".modal-overlay").forEach((overlay) => {
       settleConfirm(false);
       return;
     }
+    if (overlay.id === "targetPickerModal") {
+      settleTargetPicker(null);
+      return;
+    }
     closeModal(overlay.id);
   });
 });
@@ -927,6 +1131,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (isModalOpen("confirmModal")) {
     settleConfirm(false);
+    return;
+  }
+  const opened = $$(".modal-overlay.active");
+  if (opened.length && opened[opened.length - 1].id === "targetPickerModal") {
+    settleTargetPicker(null);
     return;
   }
   closeTopModal();
@@ -993,8 +1202,9 @@ function renderBackupSelectorWorkbench() {
   terminalWorkbench.innerHTML = `
     <div class="terminal-workbench-head">
       <div class="terminal-workbench-copy">
-        <div class="terminal-workbench-title">待删除备份列表</div>
+        <div class="terminal-workbench-title">备份列表（可回滚 / 可删除）</div>
         <div class="terminal-workbench-meta">项目：${escapeHtml(state.projectName)}</div>
+        <div class="terminal-workbench-meta">目标：${escapeHtml(safeText(state.targetLabel, "-"))}</div>
         <div class="terminal-workbench-meta">目录：${escapeHtml(state.backupRootPath)}</div>
         <div class="terminal-workbench-meta">规则：${escapeHtml(state.backupFolderBaseName)}_YYYYMMDD_HHmmss</div>
       </div>
@@ -1008,15 +1218,26 @@ function renderBackupSelectorWorkbench() {
     </div>
     <div class="backup-selector-list" role="group" aria-label="备份目录选择列表">
       ${state.items.map((item, index) => `
-        <label class="backup-selector-item">
-          <input
-            type="checkbox"
-            data-terminal-backup-index="${index}"
-            ${item.selected ? "checked" : ""}
-            ${state.pending ? "disabled" : ""}
-          >
+        <div class="backup-selector-item">
+          <label class="backup-selector-item-check">
+            <input
+              type="checkbox"
+              data-terminal-backup-index="${index}"
+              ${item.selected ? "checked" : ""}
+              ${state.pending ? "disabled" : ""}
+              aria-label="选择备份 ${escapeHtml(item.name)}"
+            >
+          </label>
           <span class="backup-selector-name">${escapeHtml(item.name)}</span>
-        </label>
+          <button
+            class="btn btn-xs btn-warn"
+            type="button"
+            data-terminal-rollback-index="${index}"
+            ${state.pending ? "disabled" : ""}
+            aria-label="回滚到备份 ${escapeHtml(item.name)}"
+            title="将该目标回滚到此备份（当前线上目录会先保存为新备份）"
+          >回滚</button>
+        </div>
       `).join("")}
     </div>
   `;
@@ -1037,6 +1258,14 @@ if (terminalWorkbench) {
   });
 
   terminalWorkbench.addEventListener("click", async (event) => {
+    const rollbackButton = event.target.closest("button[data-terminal-rollback-index]");
+    if (rollbackButton) {
+      if (!backupSelectorState || backupSelectorState.pending) return;
+      const index = Number.parseInt(rollbackButton.dataset.terminalRollbackIndex, 10);
+      await rollbackBackupFromWorkbench(index);
+      return;
+    }
+
     const actionButton = event.target.closest("button[data-terminal-action]");
     if (!actionButton || !backupSelectorState || backupSelectorState.pending) return;
 
@@ -1218,120 +1447,653 @@ function getProjectById(projectId) {
   return projects.find((item) => item.id === projectId) || null;
 }
 
-function hasReusableDeployConfig(project) {
-  const deploy = project?.deploy || {};
-  return Boolean(
-    String(deploy.host || "").trim() ||
-    String(deploy.username || "").trim() ||
-    String(deploy.password || "").trim() ||
-    String(deploy.privateKey || "").trim() ||
-    String(deploy.deployPath || "").trim() ||
-    String(deploy.backupPath || "").trim()
-  );
+function getServerById(serverId) {
+  return servers.find((item) => item.id === serverId) || null;
 }
 
-function getReusableDeployCandidates(currentProjectId, preferredGroupName) {
-  const currentGroupName = normalizeGroupName(preferredGroupName);
-  return projects
-    .filter((project) => String(project.id || "") !== String(currentProjectId || ""))
-    .filter(hasReusableDeployConfig)
-    .sort((a, b) => {
-      const aSameGroup = normalizeGroupName(a.groupName) === currentGroupName;
-      const bSameGroup = normalizeGroupName(b.groupName) === currentGroupName;
-      if (aSameGroup !== bSameGroup) return aSameGroup ? -1 : 1;
+/* ===== 目标选择弹窗（deploy 多选 / link 全量多选 / backup 单选） ===== */
 
-      const groupCompare = normalizeGroupName(a.groupName).localeCompare(
-        normalizeGroupName(b.groupName),
-        "zh-Hans-CN"
-      );
-      if (groupCompare !== 0) return groupCompare;
+function settleTargetPicker(result) {
+  const resolver = targetPickerResolver;
+  targetPickerResolver = null;
+  targetPickerState = null;
+  closeModal("targetPickerModal");
+  if (resolver) resolver(result);
+}
 
-      const nameCompare = safeText(a.projectName, "").localeCompare(
-        safeText(b.projectName, ""),
-        "zh-Hans-CN"
-      );
-      if (nameCompare !== 0) return nameCompare;
-
-      const aTime = new Date(a.createdAt || 0).getTime();
-      const bTime = new Date(b.createdAt || 0).getTime();
-      return bTime - aTime;
+function getTargetPickerItems() {
+  const state = targetPickerState;
+  if (!state) return [];
+  if (state.mode === "link") {
+    const items = [];
+    servers.forEach((server) => {
+      (server.paths || []).forEach((pathEntry) => {
+        items.push({ server, path: pathEntry });
+      });
     });
+    return items;
+  }
+  return getProjectTargets(getProjectById(state.projectId));
 }
 
-function formatReusableProjectLabel(project, preferredGroupName) {
-  const sameGroup = normalizeGroupName(project.groupName) === normalizeGroupName(preferredGroupName);
-  const deploy = project?.deploy || {};
-  const authMode = String(deploy.privateKey || "").trim() ? "私钥" : (
-    String(deploy.password || "").trim() ? "密码" : "未配认证"
-  );
-  const prefix = sameGroup ? "同组优先 | " : "";
-  return `${prefix}${safeText(project.projectName)} | ${normalizeGroupName(project.groupName)} | ${safeText(deploy.host)} | ${safeText(deploy.deployPath)} | ${authMode}`;
-}
+function renderTargetPicker() {
+  const state = targetPickerState;
+  const listEl = byId("targetPickerList");
+  const emptyEl = byId("targetPickerEmpty");
+  const actionsEl = byId("targetPickerActions");
+  const countEl = byId("targetPickerCount");
+  const confirmBtn = byId("btnTargetPickerConfirm");
+  if (!state || !listEl || !emptyEl || !countEl || !confirmBtn) return;
 
-function setEditDeployHint(message, color = "") {
-  const hint = $(".edit-json-hint");
-  if (!hint) return;
-  hint.textContent = String(message || "");
-  hint.style.color = color;
-}
+  const items = getTargetPickerItems();
+  const single = state.mode === "backup";
 
-function renderReuseProjectOptions({ forceOpen = false } = {}) {
-  const row = byId("editReuseConfigRow");
-  const select = byId("editReuseProjectSelect");
-  const applyBtn = byId("btnApplyReuseProjectConfig");
-  const currentProject = getProjectById(currentEditId);
-  if (!row || !select || !applyBtn || !currentProject) return [];
-
-  const preferredGroupName = byId("editGroupName")?.value || currentProject.groupName;
-  const previousValue = select.value;
-  const candidates = getReusableDeployCandidates(currentEditId, preferredGroupName);
-
-  if (!candidates.length) {
-    select.innerHTML = '<option value="">暂无可复用项目配置</option>';
-    select.value = "";
-    select.disabled = true;
-    applyBtn.disabled = true;
-    row.hidden = !forceOpen;
-    return [];
+  if (!items.length) {
+    listEl.innerHTML = "";
+    emptyEl.hidden = false;
+    emptyEl.textContent = state.mode === "link"
+      ? "暂无服务器与部署路径，请先在“服务器管理”中创建。"
+      : "该项目尚未关联部署目标，请先编辑项目进行关联。";
+    actionsEl.style.display = "none";
+    countEl.textContent = "";
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "确认";
+    return;
   }
 
-  select.innerHTML = [
-    '<option value="">请选择项目配置…</option>',
-    ...candidates.map((project) => (
-      `<option value="${escapeHtml(project.id)}">${escapeHtml(formatReusableProjectLabel(project, preferredGroupName))}</option>`
-    ))
-  ].join("");
+  emptyEl.hidden = true;
+  actionsEl.style.display = single ? "none" : "";
 
-  select.disabled = false;
-  applyBtn.disabled = false;
-  row.hidden = !forceOpen;
+  const groups = new Map();
+  items.forEach((item) => {
+    if (!groups.has(item.server.id)) groups.set(item.server.id, { server: item.server, items: [] });
+    groups.get(item.server.id).items.push(item);
+  });
 
-  const hasPrevious = candidates.some((project) => String(project.id) === previousValue);
-  if (hasPrevious) {
-    select.value = previousValue;
-  } else if (candidates[0]) {
-    select.value = String(candidates[0].id);
+  listEl.innerHTML = Array.from(groups.values()).map(({ server, items: groupItems }) => `
+    <div class="target-picker-group">
+      <div class="target-picker-group-title">${escapeHtml(safeText(server.name))} · ${escapeHtml(safeText(server.host))}:${escapeHtml(safeText(server.port, 22))}</div>
+      ${groupItems.map(({ path: pathEntry }) => {
+        const selected = state.selectedIds.includes(pathEntry.id);
+        const input = single
+          ? `<input type="radio" name="targetPickerChoice" value="${escapeHtml(pathEntry.id)}" ${selected ? "checked" : ""}>`
+          : `<input type="checkbox" data-picker-path-id="${escapeHtml(pathEntry.id)}" ${selected ? "checked" : ""}>`;
+        return `
+        <label class="target-picker-item">
+          ${input}
+          <span class="target-picker-item-body">
+            <span class="target-picker-item-name">${escapeHtml(String(pathEntry.label || "").trim() || "部署路径")}</span>
+            <span class="target-picker-item-path" title="${escapeHtml(safeText(pathEntry.deployPath))}">${escapeHtml(safeText(pathEntry.deployPath))}</span>
+            ${state.mode === "link" && Number(pathEntry.usedCount) > 0 ? `<span class="target-picker-item-meta">${pathEntry.usedCount} 个项目在用</span>` : ""}
+          </span>
+        </label>
+        `;
+      }).join("")}
+    </div>
+  `).join("");
+
+  syncTargetPickerControls();
+}
+
+function syncTargetPickerControls() {
+  const state = targetPickerState;
+  const countEl = byId("targetPickerCount");
+  const confirmBtn = byId("btnTargetPickerConfirm");
+  if (!state) return;
+
+  const items = getTargetPickerItems();
+  const selectedCount = state.selectedIds.filter((id) => items.some((item) => item.path.id === id)).length;
+  const single = state.mode === "backup";
+
+  if (countEl) {
+    countEl.textContent = single ? `共 ${items.length} 个目标` : `已选 ${selectedCount} / ${items.length}`;
+  }
+  if (confirmBtn) {
+    confirmBtn.disabled = selectedCount === 0;
+    if (single) confirmBtn.textContent = "查看备份";
+    else if (state.mode === "deploy") confirmBtn.textContent = `部署 ${selectedCount} 个目标`;
+    else confirmBtn.textContent = `关联 ${selectedCount} 个目标`;
+  }
+}
+
+function openTargetPicker({ mode, projectId = null }) {
+  const items = mode === "link"
+    ? servers.flatMap((server) => (server.paths || []).map((pathEntry) => ({ server, path: pathEntry })))
+    : getProjectTargets(getProjectById(projectId));
+
+  let selectedIds;
+  if (mode === "deploy") {
+    selectedIds = items.map((item) => item.path.id);
+  } else if (mode === "backup") {
+    selectedIds = items.length ? [items[0].path.id] : [];
+  } else {
+    selectedIds = [...currentEditTargetIds];
   }
 
-  return candidates;
+  const titles = {
+    deploy: "选择部署目标",
+    backup: "选择备份目标",
+    link: "关联部署目标"
+  };
+  byId("targetPickerTitle").textContent = titles[mode] || "选择部署目标";
+
+  targetPickerState = { mode, projectId, selectedIds };
+  renderTargetPicker();
+  openModal("targetPickerModal");
+
+  return new Promise((resolve) => {
+    targetPickerResolver = resolve;
+  });
 }
 
-function applyDeployConfigFromProject(sourceProject) {
-  if (!sourceProject) return false;
+byId("targetPickerList").addEventListener("change", (event) => {
+  const state = targetPickerState;
+  if (!state) return;
+  const input = event.target.closest("input[data-picker-path-id], input[name='targetPickerChoice']");
+  if (!input) return;
 
-  const deploy = sourceProject.deploy || {};
-  byId("editHost").value = safeText(deploy.host, "");
-  byId("editPort").value = safeText(deploy.port, "22");
-  byId("editUsername").value = safeText(deploy.username, "");
-  byId("editPassword").value = safeText(deploy.password, "");
-  byId("editPrivateKey").value = safeText(deploy.privateKey, "");
-  byId("editDeployPath").value = safeText(deploy.deployPath, "");
-  currentEditBackupPath = String(deploy.backupPath || "").trim();
+  // checkbox 未设 value 属性（默认 "on"），路径 id 一律从 dataset 取
+  const pathId = input.type === "radio" ? input.value : input.dataset.pickerPathId;
+  if (!pathId) return;
 
-  switchEditAuthTab(String(deploy.privateKey || "").trim() ? "key" : "password");
-  setEditDeployHint(`已复用：${safeText(sourceProject.projectName)} 的部署配置`);
-  return true;
+  if (input.type === "radio") {
+    state.selectedIds = [pathId];
+  } else if (input.checked) {
+    if (!state.selectedIds.includes(pathId)) state.selectedIds.push(pathId);
+  } else {
+    state.selectedIds = state.selectedIds.filter((id) => id !== pathId);
+  }
+  syncTargetPickerControls();
+});
+
+byId("targetPickerActions").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-picker-action]");
+  const state = targetPickerState;
+  if (!button || !state) return;
+
+  const items = getTargetPickerItems();
+  if (button.dataset.pickerAction === "select-all") {
+    state.selectedIds = items.map((item) => item.path.id);
+  } else if (button.dataset.pickerAction === "invert-selection") {
+    const current = new Set(state.selectedIds);
+    state.selectedIds = items.map((item) => item.path.id).filter((id) => !current.has(id));
+  }
+  renderTargetPicker();
+});
+
+byId("btnTargetPickerCancel").addEventListener("click", () => settleTargetPicker(null));
+
+byId("btnTargetPickerConfirm").addEventListener("click", () => {
+  const state = targetPickerState;
+  if (!state || !state.selectedIds.length) return;
+  settleTargetPicker(state.mode === "backup" ? state.selectedIds[0] : [...state.selectedIds]);
+});
+
+/* ===== 部署流程 ===== */
+
+async function startDeployFlow(projectId, triggerButton, presetTargetIds = null) {
+  const project = getProjectById(projectId);
+  if (!project) {
+    showToast("未找到项目，无法部署。", "warn");
+    return;
+  }
+  const projectName = safeText(project.projectName, "当前项目");
+  const targets = getProjectTargets(project);
+  if (!targets.length) {
+    showToast("该项目尚未关联部署目标，请先编辑项目进行关联。", "warn");
+    return;
+  }
+
+  let selectedIds;
+  if (Array.isArray(presetTargetIds) && presetTargetIds.length) {
+    selectedIds = presetTargetIds.filter((id) => targets.some((item) => item.path.id === id));
+  } else {
+    selectedIds = await openTargetPicker({ mode: "deploy", projectId });
+    if (!selectedIds) return;
+  }
+  if (!selectedIds.length) {
+    showToast("请至少选择一个部署目标。", "warn");
+    return;
+  }
+
+  const allowed = await validateBranchBeforeAction(projectId, projectName, "部署");
+  if (!allowed) return;
+
+  const selectedLabels = selectedIds.map((id) => {
+    const found = findPathById(id);
+    return found ? `${safeText(found.server.name)} ${safeText(found.path.deployPath)}` : id;
+  });
+  const confirmed = await askConfirm({
+    title: "确认部署",
+    message: `将部署 “${projectName}” 到 ${selectedIds.length} 个目标（${selectedLabels.join("； ")}）。请确认分支和配置都已核对无误。`,
+    confirmText: "确认部署",
+    tone: "warn"
+  });
+  if (!confirmed) return;
+
+  const runner = triggerButton
+    ? (task) => withButtonLoading(triggerButton, "部署中…", task)
+    : (task) => Promise.resolve(task());
+
+  await runner(async () => {
+    termClear();
+    termSeparator(`部署 ${projectName}（${selectedIds.length} 个目标）`);
+    try {
+      const result = await runStreamingFetch(`/api/deploy/${projectId}`, `部署 ${projectName}`, {
+        body: { targetIds: selectedIds }
+      });
+      await loadProjects({ silent: true });
+      const successCount = Number(result?.successCount) || 0;
+      const failedCount = Number(result?.failedCount) || 0;
+      if (failedCount > 0) {
+        setOperationStatus("warn", "状态：部署部分失败");
+        showToast(`部署结束：成功 ${successCount} 个 / 失败 ${failedCount} 个目标。`, "warn", 3600);
+      } else {
+        showToast(`项目 ${projectName} 已成功部署到 ${successCount} 个目标。`, "success");
+      }
+    } catch (error) {
+      showToast(`部署失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
+    }
+  });
 }
+
+/* ===== 服务器管理弹窗 ===== */
+
+function updateServerCountBadge() {
+  const badge = byId("serverCountBadge");
+  if (badge) badge.textContent = String(servers.length);
+}
+
+function switchServerAuthTab(type) {
+  const tabs = $$(".server-auth-tabs .tab-btn");
+  tabs.forEach((tab) => {
+    const isActive = tab.dataset.auth === type;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-selected", String(isActive));
+  });
+
+  $(".server-auth-password").hidden = type !== "password";
+  $(".server-auth-key").hidden = type !== "key";
+}
+
+function renderServerManager() {
+  const listPanel = byId("serverManagerList");
+  const serverForm = byId("serverFormPanel");
+  const pathForm = byId("pathFormPanel");
+  if (!listPanel || !serverForm || !pathForm) return;
+
+  listPanel.hidden = serverModalState.mode !== "list";
+  serverForm.hidden = serverModalState.mode !== "server-form";
+  pathForm.hidden = serverModalState.mode !== "path-form";
+
+  if (serverModalState.mode !== "list") return;
+  renderServerList();
+}
+
+function renderServerList() {
+  const container = byId("serverList");
+  if (!container) return;
+
+  if (!servers.length) {
+    container.innerHTML = `<div class="server-empty">暂无服务器。点击“新建服务器”添加第一台服务器，再为其维护部署路径。</div>`;
+    return;
+  }
+
+  container.innerHTML = servers.map((server, serverIndex) => {
+    const authMode = String(server.privateKey || "").trim() ? "私钥" : "密码";
+    const paths = server.paths || [];
+    const pathRows = paths.length ? paths.map((pathEntry, pathIndex) => `
+      <div class="server-path-row" data-path-id="${escapeHtml(pathEntry.id)}">
+        <span class="server-path-label" title="${escapeHtml(safeText(pathEntry.label, ""))}">${escapeHtml(safeText(pathEntry.label, ""))}</span>
+        <span class="server-path-deploy" title="${escapeHtml(safeText(pathEntry.deployPath))}">${escapeHtml(safeText(pathEntry.deployPath))}</span>
+        <span class="server-path-used">${Number(pathEntry.usedCount) || 0} 个项目</span>
+        <div class="server-path-actions">
+          <button
+            class="btn btn-xs btn-secondary"
+            type="button"
+            data-server-action="move-path"
+            data-server-id="${escapeHtml(server.id)}"
+            data-path-id="${escapeHtml(pathEntry.id)}"
+            data-direction="up"
+            ${pathIndex === 0 ? "disabled title=\"已在最顶部\"" : `aria-label="上移路径 ${escapeHtml(safeText(pathEntry.deployPath))}"`}
+          >上移</button>
+          <button
+            class="btn btn-xs btn-secondary"
+            type="button"
+            data-server-action="move-path"
+            data-server-id="${escapeHtml(server.id)}"
+            data-path-id="${escapeHtml(pathEntry.id)}"
+            data-direction="down"
+            ${pathIndex === paths.length - 1 ? "disabled title=\"已在最底部\"" : `aria-label="下移路径 ${escapeHtml(safeText(pathEntry.deployPath))}"`}
+          >下移</button>
+          <button
+            class="btn btn-xs btn-secondary"
+            type="button"
+            data-server-action="edit-path"
+            data-server-id="${escapeHtml(server.id)}"
+            data-path-id="${escapeHtml(pathEntry.id)}"
+            aria-label="编辑路径 ${escapeHtml(safeText(pathEntry.deployPath))}"
+          >编辑</button>
+          <button
+            class="btn btn-xs btn-danger"
+            type="button"
+            data-server-action="delete-path"
+            data-server-id="${escapeHtml(server.id)}"
+            data-path-id="${escapeHtml(pathEntry.id)}"
+            aria-label="删除路径 ${escapeHtml(safeText(pathEntry.deployPath))}"
+          >删除</button>
+        </div>
+      </div>
+    `).join("") : `<div class="server-empty">暂无部署路径，点击“新增路径”创建。</div>`;
+
+    return `
+      <div class="server-card" data-server-id="${escapeHtml(server.id)}">
+        <div class="server-card-head">
+          <span class="server-card-name">${escapeHtml(safeText(server.name))}</span>
+          <span class="server-card-endpoint" title="${escapeHtml(safeText(server.host))}:${escapeHtml(safeText(server.port, 22))}">${escapeHtml(safeText(server.host))}:${escapeHtml(safeText(server.port, 22))}</span>
+          <span class="server-card-auth">${escapeHtml(safeText(server.username))} · ${authMode}</span>
+          <div class="server-card-actions">
+            <button
+              class="btn btn-xs btn-secondary"
+              type="button"
+              data-server-action="move-server"
+              data-server-id="${escapeHtml(server.id)}"
+              data-direction="up"
+              ${serverIndex === 0 ? "disabled title=\"已在最顶部\"" : `aria-label="上移服务器 ${escapeHtml(safeText(server.name))}"`}
+            >上移</button>
+            <button
+              class="btn btn-xs btn-secondary"
+              type="button"
+              data-server-action="move-server"
+              data-server-id="${escapeHtml(server.id)}"
+              data-direction="down"
+              ${serverIndex === servers.length - 1 ? "disabled title=\"已在最底部\"" : `aria-label="下移服务器 ${escapeHtml(safeText(server.name))}"`}
+            >下移</button>
+            <button class="btn btn-xs btn-secondary" type="button" data-server-action="edit-server" data-server-id="${escapeHtml(server.id)}">编辑</button>
+            <button class="btn btn-xs btn-secondary" type="button" data-server-action="add-path" data-server-id="${escapeHtml(server.id)}">新增路径</button>
+            <button class="btn btn-xs btn-secondary" type="button" data-server-action="test-conn" data-server-id="${escapeHtml(server.id)}" data-server-name="${escapeHtml(safeText(server.name))}">测试连接</button>
+            <button class="btn btn-xs btn-danger" type="button" data-server-action="delete-server" data-server-id="${escapeHtml(server.id)}" data-server-name="${escapeHtml(safeText(server.name))}">删除</button>
+          </div>
+        </div>
+        <div class="server-path-list">${pathRows}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function openServerManager() {
+  serverModalState = { mode: "list", editingServerId: null, editingPathId: null };
+  serverFormImportedPath = "";
+  renderServerManager();
+  openModal("serverModal");
+}
+
+function openServerForm(serverId = null) {
+  const server = serverId ? getServerById(serverId) : null;
+  serverModalState = { mode: "server-form", editingServerId: serverId, editingPathId: null };
+
+  byId("serverFormTitle").textContent = server ? "编辑服务器" : "新建服务器";
+  byId("serverFormName").value = safeText(server?.name, "");
+  byId("serverFormHost").value = safeText(server?.host, "");
+  byId("serverFormPort").value = safeText(server?.port, "22");
+  byId("serverFormUsername").value = safeText(server?.username, "");
+  byId("serverFormPassword").value = safeText(server?.password, "");
+  byId("serverFormPrivateKey").value = safeText(server?.privateKey, "");
+  const hint = byId("serverFormJsonHint");
+  if (hint) hint.textContent = "";
+  switchServerAuthTab(String(server?.privateKey || "").trim() ? "key" : "password");
+  renderServerManager();
+}
+
+function openPathForm(serverId, pathId = null) {
+  const server = getServerById(serverId);
+  if (!server) return;
+  const pathEntry = pathId ? (server.paths || []).find((item) => item.id === pathId) : null;
+  serverModalState = { mode: "path-form", editingServerId: serverId, editingPathId: pathId };
+
+  byId("pathFormTitle").textContent = pathEntry ? "编辑部署路径" : "新增部署路径";
+  byId("pathFormServerLabel").textContent = `所属服务器：${safeText(server.name)}（${safeText(server.host)}）`;
+  byId("pathFormLabel").value = safeText(pathEntry?.label, "");
+  byId("pathFormDeployPath").value = safeText(pathEntry?.deployPath, !pathEntry ? serverFormImportedPath : "");
+  byId("pathFormBackupPath").value = safeText(pathEntry?.backupPath, "");
+  renderServerManager();
+}
+
+async function saveServerForm() {
+  const { editingServerId } = serverModalState;
+  const authType = $(".server-auth-tabs .tab-btn.active")?.dataset.auth || "password";
+  const body = {
+    name: byId("serverFormName").value.trim(),
+    host: byId("serverFormHost").value.trim(),
+    port: Number.parseInt(byId("serverFormPort").value, 10) || 22,
+    username: byId("serverFormUsername").value.trim()
+  };
+  if (authType === "password") body.password = byId("serverFormPassword").value;
+  else body.privateKey = byId("serverFormPrivateKey").value;
+
+  if (!body.name || !body.host || !body.username) {
+    showToast("服务器名称、地址和用户名不能为空。", "warn");
+    return;
+  }
+  if (authType === "password" && !body.password && !editingServerId) {
+    showToast("请填写服务器密码。", "warn");
+    return;
+  }
+  if (authType === "key" && !body.privateKey && !editingServerId) {
+    showToast("请填写服务器私钥。", "warn");
+    return;
+  }
+
+  try {
+    if (editingServerId) {
+      await api(`/api/servers/${editingServerId}`, { method: "PUT", body: body });
+      showToast("服务器信息已更新。", "success");
+    } else {
+      const created = await api("/api/servers", { method: "POST", body: body });
+      showToast("服务器已创建。", "success");
+      if (serverFormImportedPath) {
+        const imported = serverFormImportedPath;
+        serverFormImportedPath = "";
+        await loadServers({ silent: true });
+        openPathForm(created.id);
+        return;
+      }
+    }
+    serverModalState = { mode: "list", editingServerId: null, editingPathId: null };
+    serverFormImportedPath = "";
+    await loadServers({ silent: true });
+    renderServerManager();
+  } catch (error) {
+    showToast(`保存失败：${normalizeErrorMessage(error.message)}`, "error");
+  }
+}
+
+async function savePathForm() {
+  const { editingServerId, editingPathId } = serverModalState;
+  if (!editingServerId) return;
+
+  const body = {
+    label: byId("pathFormLabel").value.trim(),
+    deployPath: byId("pathFormDeployPath").value.trim(),
+    backupPath: byId("pathFormBackupPath").value.trim()
+  };
+  if (!body.deployPath) {
+    showToast("请填写部署路径。", "warn");
+    return;
+  }
+
+  try {
+    if (editingPathId) {
+      await api(`/api/servers/${editingServerId}/paths/${editingPathId}`, { method: "PUT", body: body });
+      showToast("部署路径已更新。", "success");
+    } else {
+      await api(`/api/servers/${editingServerId}/paths`, { method: "POST", body: body });
+      showToast("部署路径已创建。", "success");
+    }
+    serverModalState = { mode: "list", editingServerId: null, editingPathId: null };
+    await loadServers({ silent: true });
+    renderServerManager();
+  } catch (error) {
+    showToast(`保存失败：${normalizeErrorMessage(error.message)}`, "error");
+  }
+}
+
+byId("serverList").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-server-action]");
+  if (!button || button.disabled) return;
+
+  const action = button.dataset.serverAction;
+  const serverId = button.dataset.serverId;
+  const pathId = button.dataset.pathId;
+  const serverName = button.dataset.serverName || "该服务器";
+
+  if (action === "move-server" || action === "move-path") {
+    const url = action === "move-server"
+      ? `/api/servers/${serverId}/move`
+      : `/api/servers/${serverId}/paths/${pathId}/move`;
+    try {
+      await api(url, { method: "POST", body: { direction: button.dataset.direction } });
+      await loadServers({ silent: true });
+      renderServerManager();
+      renderList();
+    } catch (error) {
+      showToast(`调整顺序失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
+    }
+    return;
+  }
+
+  if (action === "edit-server") {
+    openServerForm(serverId);
+    return;
+  }
+
+  if (action === "add-path") {
+    openPathForm(serverId);
+    return;
+  }
+
+  if (action === "test-conn") {
+    await testServerConnection(serverId, button);
+    return;
+  }
+
+  if (action === "delete-server") {
+    const confirmed = await askConfirm({
+      title: "确认删除服务器",
+      message: `将删除服务器“${serverName}”及其全部部署路径配置（不影响项目记录）。被项目引用时无法删除。`,
+      confirmText: "删除服务器",
+      tone: "danger"
+    });
+    if (!confirmed) return;
+
+    try {
+      await api(`/api/servers/${serverId}`, { method: "DELETE" });
+      await loadServers({ silent: true });
+      renderServerManager();
+      renderList();
+      showToast("服务器已删除。", "success");
+    } catch (error) {
+      showToast(`删除失败：${normalizeErrorMessage(error.message)}`, "error", 3600);
+    }
+    return;
+  }
+
+  if (action === "edit-path") {
+    openPathForm(serverId, pathId);
+    return;
+  }
+
+  if (action === "delete-path") {
+    const confirmed = await askConfirm({
+      title: "确认删除部署路径",
+      message: `将删除该部署路径。仍被项目引用时无法删除。`,
+      confirmText: "删除路径",
+      tone: "danger"
+    });
+    if (!confirmed) return;
+
+    try {
+      await api(`/api/servers/${serverId}/paths/${pathId}`, { method: "DELETE" });
+      await loadServers({ silent: true });
+      renderServerManager();
+      renderList();
+      showToast("部署路径已删除。", "success");
+    } catch (error) {
+      showToast(`删除失败：${normalizeErrorMessage(error.message)}`, "error", 3600);
+    }
+  }
+});
+
+byId("btnAddServer").addEventListener("click", () => openServerForm(null));
+byId("btnCancelServerForm").addEventListener("click", () => {
+  serverModalState = { mode: "list", editingServerId: null, editingPathId: null };
+  serverFormImportedPath = "";
+  renderServerManager();
+});
+byId("btnSaveServerForm").addEventListener("click", saveServerForm);
+byId("btnCancelPathForm").addEventListener("click", () => {
+  serverModalState = { mode: "list", editingServerId: null, editingPathId: null };
+  serverFormImportedPath = "";
+  renderServerManager();
+});
+byId("btnSavePathForm").addEventListener("click", savePathForm);
+byId("btnManageServers").addEventListener("click", openServerManager);
+byId("btnManageServersFromEdit").addEventListener("click", openServerManager);
+
+$$(".server-auth-tabs .tab-btn").forEach((tab) => {
+  tab.addEventListener("click", () => switchServerAuthTab(tab.dataset.auth));
+});
+
+byId("btnImportServerJson").addEventListener("click", () => {
+  byId("serverFormJsonFile").click();
+});
+
+byId("serverFormJsonFile").addEventListener("change", async () => {
+  const file = byId("serverFormJsonFile").files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const data = await api("/api/import-json", { method: "POST", body: formData });
+    const connName = safeText(data.connectionName, file.name.replace(/\.json$/i, ""));
+    const hint = byId("serverFormJsonHint");
+
+    if (data.host) byId("serverFormHost").value = data.host;
+    if (data.port) byId("serverFormPort").value = data.port;
+    if (data.username) byId("serverFormUsername").value = data.username;
+    if (!byId("serverFormName").value.trim() && data.host) {
+      byId("serverFormName").value = connName || data.host;
+    }
+
+    if (data.privateKey) {
+      byId("serverFormPrivateKey").value = data.privateKey;
+      switchServerAuthTab("key");
+    }
+    if (data.password) {
+      if (data.encryptedPassword) {
+        byId("serverFormPassword").value = "";
+        if (hint) hint.textContent = "密码为加密存储，请手动填写明文密码";
+        showToast("JSON 中密码为加密值，请手动输入服务器明文密码。", "warn", 3600);
+      } else {
+        byId("serverFormPassword").value = data.password;
+      }
+      switchServerAuthTab("password");
+    }
+
+    if (data.deployPath) {
+      serverFormImportedPath = String(data.deployPath).trim();
+      if (hint) hint.textContent = `${hint.textContent ? hint.textContent + "；" : ""}已读取部署路径，保存服务器后将自动带入新增路径表单`;
+    }
+
+    showToast("JSON 配置导入成功。", "success");
+  } catch (error) {
+    showToast(`导入失败：${normalizeErrorMessage(error.message)}`, "error");
+  } finally {
+    byId("serverFormJsonFile").value = "";
+  }
+});
 
 async function refreshProjectGit(projectId, triggerButton) {
   const project = getProjectById(projectId);
@@ -1397,22 +2159,21 @@ async function syncProjectGitInfo(projectId, { render = false } = {}) {
   return updated;
 }
 
-function buildConnPayloadFromProject(project) {
-  const deploy = project?.deploy || {};
-  const host = String(deploy.host || "").trim();
-  const username = String(deploy.username || "").trim();
+function buildConnPayloadFromServer(server) {
+  const host = String(server?.host || "").trim();
+  const username = String(server?.username || "").trim();
   if (!host || !username) {
-    return { ok: false, message: "请先配置服务器地址和用户名。" };
+    return { ok: false, message: "服务器配置缺少地址或用户名。" };
   }
 
   const payload = {
     host,
-    port: Number.parseInt(deploy.port, 10) || 22,
+    port: Number.parseInt(server.port, 10) || 22,
     username
   };
 
-  const privateKey = String(deploy.privateKey || "").trim();
-  const password = String(deploy.password || "");
+  const privateKey = String(server.privateKey || "").trim();
+  const password = String(server.password || "");
 
   if (privateKey) {
     payload.privateKey = privateKey;
@@ -1424,7 +2185,54 @@ function buildConnPayloadFromProject(project) {
     return { ok: true, payload };
   }
 
-  return { ok: false, message: "请先在部署配置中填写密码或私钥。" };
+  return { ok: false, message: "该服务器缺少密码或私钥，请在服务器管理中补全。" };
+}
+
+async function runConnectionTest(payload, label) {
+  const target = `${payload.username}@${payload.host}:${payload.port}`;
+  termCmd(`目标：${target}`);
+  termLog(`认证方式：${payload.privateKey ? "私钥" : "密码"}`);
+  setOperationStatus("running", "状态：连接测试中", `最近动作：正在连接 ${target}`);
+  try {
+    await api("/api/test-connection", { method: "POST", body: payload });
+    termSuccess(`${label} 连接测试通过。`);
+    return { ok: true, target };
+  } catch (error) {
+    termError(`${label} 连接失败：${normalizeErrorMessage(error.message)}`);
+    return { ok: false, target };
+  }
+}
+
+async function testServerConnection(serverId, triggerButton) {
+  const server = getServerById(serverId);
+  if (!server) {
+    showToast("未找到服务器，无法测试连接。", "warn");
+    return;
+  }
+  const parsed = buildConnPayloadFromServer(server);
+  if (!parsed.ok) {
+    termClear();
+    termSeparator(`测试连接 ${safeText(server.name)}`);
+    termError(parsed.message);
+    showToast(parsed.message, "warn");
+    return;
+  }
+
+  const runner = triggerButton
+    ? (task) => withButtonLoading(triggerButton, "测试中…", task)
+    : (task) => Promise.resolve(task());
+  await runner(async () => {
+    termClear();
+    termSeparator(`测试连接 ${safeText(server.name)}`);
+    const result = await runConnectionTest(parsed.payload, safeText(server.name));
+    if (result.ok) {
+      setOperationStatus("success", "状态：连接测试通过", `最近动作：${result.target} 连接成功`);
+      showToast(`服务器 ${safeText(server.name)} 连接成功。`, "success");
+    } else {
+      setOperationStatus("error", "状态：连接测试失败", `最近动作：${result.target} 连接失败`);
+      showToast(`连接失败：${safeText(server.name)}`, "error", 3400);
+    }
+  });
 }
 
 async function testProjectConnection(projectId, triggerButton) {
@@ -1439,47 +2247,58 @@ async function testProjectConnection(projectId, triggerButton) {
   }
 
   const projectName = safeText(project.projectName, "当前项目");
-  const parsed = buildConnPayloadFromProject(project);
-  if (!parsed.ok) {
+  const linkedServers = getProjectLinkedServers(project);
+  if (!linkedServers.length) {
     termClear();
     termSeparator(`测试连接 ${projectName}`);
-    termError(parsed.message);
-    setOperationStatus("warn", "状态：连接测试未开始", "最近动作：连接配置不完整");
-    showToast(parsed.message, "warn");
+    termError("该项目尚未关联部署目标，请先编辑项目进行关联。");
+    setOperationStatus("warn", "状态：连接测试未开始", "最近动作：未关联部署目标");
+    showToast("该项目尚未关联部署目标。", "warn");
+    return;
+  }
+
+  const invalidServer = linkedServers.find((server) => !buildConnPayloadFromServer(server).ok);
+  if (invalidServer) {
+    const message = buildConnPayloadFromServer(invalidServer).message;
+    termClear();
+    termSeparator(`测试连接 ${projectName}`);
+    termError(message);
+    setOperationStatus("warn", "状态：连接测试未开始", "最近动作：服务器配置不完整");
+    showToast(message, "warn");
     return;
   }
 
   const runner = triggerButton
     ? (task) => withButtonLoading(triggerButton, "测试中…", task)
     : (task) => Promise.resolve(task());
-
   await runner(async () => {
-    const payload = parsed.payload;
-    const target = `${payload.username}@${payload.host}:${payload.port}`;
-    const authMode = payload.privateKey ? "私钥" : "密码";
     termClear();
-    termSeparator(`测试连接 ${projectName}`);
-    termCmd(`目标：${target}`);
-    termLog(`认证方式：${authMode}`);
-    setOperationStatus("running", "状态：连接测试中", `最近动作：正在连接 ${target}`);
-    try {
-      await api("/api/test-connection", { method: "POST", body: payload });
-      termSuccess("连接测试通过。");
-      setOperationStatus("success", "状态：连接测试通过", `最近动作：${target} 连接成功`);
-      showToast(`项目 ${projectName} 连接成功。`, "success");
-    } catch (error) {
-      const message = normalizeErrorMessage(error.message);
-      termError(`连接失败：${message}`);
-      setOperationStatus("error", "状态：连接测试失败", `最近动作：${target} 连接失败`);
-      showToast(`连接失败：${message}`, "error", 3400);
+    termSeparator(`测试连接 ${projectName}（${linkedServers.length} 台服务器）`);
+    let okCount = 0;
+    for (const server of linkedServers) {
+      const parsed = buildConnPayloadFromServer(server);
+      const result = await runConnectionTest(parsed.payload, `[${safeText(server.name)}]`);
+      if (result.ok) okCount += 1;
+    }
+    if (okCount === linkedServers.length) {
+      setOperationStatus("success", "状态：连接测试通过", `最近动作：${okCount} 台服务器全部连接成功`);
+      showToast(`项目 ${projectName} 的 ${okCount} 台服务器全部连接成功。`, "success");
+    } else {
+      setOperationStatus("error", "状态：连接测试失败", `最近动作：${okCount}/${linkedServers.length} 台连接成功`);
+      showToast(`连接测试结束：${okCount}/${linkedServers.length} 台服务器连接成功。`, "error", 3400);
     }
   });
 }
 
-async function openBackupSelector(projectId, triggerButton) {
+async function openBackupSelector(projectId, targetId, triggerButton) {
   const project = getProjectById(projectId);
   if (!project) {
     showToast("未找到项目，无法读取备份列表。", "warn");
+    return;
+  }
+  const target = findPathById(targetId);
+  if (!target) {
+    showToast("部署目标无效，无法读取备份列表。", "warn");
     return;
   }
 
@@ -1490,7 +2309,7 @@ async function openBackupSelector(projectId, triggerButton) {
   }
 
   const projectName = safeText(project.projectName, "当前项目");
-  const backupRootPath = getBackupRootPath(project);
+  const targetLabel = getTargetLabel(target.server, target.path);
   const runner = triggerButton
     ? (task) => withButtonLoading(triggerButton, "读取中…", task)
     : (task) => Promise.resolve(task());
@@ -1499,12 +2318,12 @@ async function openBackupSelector(projectId, triggerButton) {
     termClear();
     terminalTitle.textContent = `备份选择 ${projectName}`;
     termSeparator(`读取备份 ${projectName}`);
-    termCmd(`目标目录：${backupRootPath}`);
+    termCmd(`目标：${targetLabel} ${safeText(target.path.deployPath)}`);
     termLog(`匹配规则：${backupFolderBaseName}_YYYYMMDD_HHmmss`);
-    setOperationStatus("running", "状态：备份列表读取中", `最近动作：正在扫描 ${projectName} 的备份目录`);
+    setOperationStatus("running", "状态：备份列表读取中", `最近动作：正在扫描 ${targetLabel} 的备份目录`);
 
     try {
-      const result = await api(`/api/list-backups/${projectId}`);
+      const result = await api(`/api/list-backups/${projectId}?targetId=${encodeURIComponent(targetId)}`);
       const items = Array.isArray(result?.items) ? result.items : [];
 
       if (!items.length) {
@@ -1517,7 +2336,9 @@ async function openBackupSelector(projectId, triggerButton) {
       backupSelectorState = {
         projectId,
         projectName,
-        backupRootPath: safeText(result.backupRootPath, backupRootPath),
+        targetId,
+        targetLabel,
+        backupRootPath: safeText(result.backupRootPath, safeText(target.path.deployPath)),
         backupFolderBaseName: safeText(result.backupFolderName, backupFolderBaseName),
         items: items.map((name) => ({ name: String(name), selected: true })),
         pending: false
@@ -1532,6 +2353,68 @@ async function openBackupSelector(projectId, triggerButton) {
       showToast(`读取备份失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
     }
   });
+}
+
+async function rollbackBackupFromWorkbench(index) {
+  const state = backupSelectorState;
+  if (!state || state.pending) return;
+  if (!Number.isInteger(index) || index < 0 || index >= state.items.length) return;
+  const item = state.items[index];
+
+  const confirmed = await askConfirm({
+    title: "确认回滚",
+    message: `将把 ${state.projectName} 的目标「${state.targetLabel}」回滚到备份 ${item.name}。当前线上目录会先保存为新备份，所选备份会保留。`,
+    confirmText: "确认回滚",
+    tone: "warn"
+  });
+  if (!confirmed) return;
+
+  state.pending = true;
+  renderBackupSelectorWorkbench();
+
+  try {
+    termClear({ preserveWorkbench: true });
+    termSeparator(`回滚 ${state.projectName}`);
+    termCmd(`目标：${state.targetLabel}`);
+    termCmd(`回滚到备份：${item.name}`);
+
+    const result = await runStreamingFetch(
+      `/api/rollback/${state.projectId}`,
+      `回滚 ${state.projectName}`,
+      {
+        method: "POST",
+        body: { targetId: state.targetId, directory: item.name }
+      }
+    );
+
+    await loadProjects({ silent: true });
+    if (result?.rollbackTime) {
+      termSuccess(`回滚时间：${result.rollbackTime}`);
+    }
+    showToast(`已回滚到 ${item.name}。`, "success");
+    // 回滚后备份列表会新增“当前线上版本”的备份，静默刷新列表（不清空终端日志）
+    try {
+      const refreshed = await api(`/api/list-backups/${state.projectId}?targetId=${encodeURIComponent(state.targetId)}`);
+      const items = Array.isArray(refreshed?.items) ? refreshed.items : [];
+      state.items = items.map((name) => ({ name: String(name), selected: true }));
+      state.pending = false;
+      if (state.items.length) {
+        renderBackupSelectorWorkbench();
+        termLog(`备份列表已刷新，共 ${state.items.length} 个目录。`);
+      } else {
+        clearTerminalWorkbench();
+        termLog("备份目录已处理完毕，选择列表已清空。");
+      }
+    } catch (error) {
+      state.pending = false;
+      renderBackupSelectorWorkbench();
+      termWarn(`刷新备份列表失败：${normalizeErrorMessage(error.message)}`);
+    }
+  } catch (error) {
+    state.pending = false;
+    renderBackupSelectorWorkbench();
+    showToast(`回滚失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
+  }
 }
 
 async function deleteSelectedBackupsFromWorkbench() {
@@ -1560,6 +2443,7 @@ async function deleteSelectedBackupsFromWorkbench() {
   try {
     termClear({ preserveWorkbench: true });
     termSeparator(`删除备份 ${backupSelectorState.projectName}`);
+    termCmd(`目标：${backupSelectorState.targetLabel}`);
     termCmd(`准备删除 ${selectedDirectories.length} 个备份目录…`);
 
     const result = await runStreamingFetch(
@@ -1567,7 +2451,10 @@ async function deleteSelectedBackupsFromWorkbench() {
       `删除备份 ${backupSelectorState.projectName}`,
       {
         method: "POST",
-        body: { directories: selectedDirectories }
+        body: {
+          targetId: backupSelectorState.targetId,
+          directories: selectedDirectories
+        }
       }
     );
 
@@ -1831,6 +2718,11 @@ byId("projectList").addEventListener("click", async (event) => {
     return;
   }
 
+  if (button.classList.contains("btn-test-server-conn")) {
+    await testServerConnection(button.dataset.serverId, button);
+    return;
+  }
+
   const projectId = button.dataset.id;
   const projectName = button.dataset.name || "";
 
@@ -1918,41 +2810,19 @@ byId("projectList").addEventListener("click", async (event) => {
   }
 
   if (button.classList.contains("btn-deploy")) {
-    const project = projects.find((item) => item.id === projectId);
-    if (!project || !hasDeployConfig(project)) {
-      showToast("请先完善部署信息。", "warn");
-      return;
-    }
-    const allowed = await validateBranchBeforeAction(projectId, projectName, "部署");
-    if (!allowed) return;
+    await startDeployFlow(projectId, button);
+    return;
+  }
 
-    const confirmed = await askConfirm({
-      title: "确认部署",
-      message: `将开始部署 “${project.projectName}”。请确认分支和配置都已核对无误。`,
-      confirmText: "确认部署",
-      tone: "warn"
-    });
-    if (!confirmed) return;
-
-    await withButtonLoading(button, "部署中…", async () => {
-      termClear();
-      termSeparator(`部署 ${projectName}`);
-      try {
-        const result = await runStreamingFetch(`/api/deploy/${projectId}`, `部署 ${projectName}`);
-        if (result?.deployTime) {
-          termSuccess(`部署时间：${result.deployTime}`);
-        }
-        await loadProjects({ silent: true });
-        showToast(`项目 ${projectName} 部署成功。`, "success");
-      } catch (error) {
-        showToast(`部署失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
-      }
-    });
+  if (button.hasAttribute("data-target-deploy")) {
+    await startDeployFlow(projectId, button, [button.dataset.targetDeploy]);
     return;
   }
 
   if (button.classList.contains("btn-delete-backups")) {
-    await openBackupSelector(projectId, button);
+    const targetId = await openTargetPicker({ mode: "backup", projectId });
+    if (!targetId) return;
+    await openBackupSelector(projectId, targetId, button);
     return;
   }
 
@@ -1989,17 +2859,55 @@ if (emptyState) {
   });
 }
 
-function switchEditAuthTab(type) {
-  const tabs = $$(".edit-auth-tabs .tab-btn");
-  tabs.forEach((tab) => {
-    const isActive = tab.dataset.auth === type;
-    tab.classList.toggle("active", isActive);
-    tab.setAttribute("aria-selected", String(isActive));
-  });
+function renderEditTargetList() {
+  const container = byId("editTargetList");
+  const hint = byId("editTargetHint");
+  if (!container) return;
 
-  $(".edit-auth-password").hidden = type !== "password";
-  $(".edit-auth-key").hidden = type !== "key";
+  if (!currentEditTargetIds.length) {
+    container.innerHTML = `<div class="edit-target-empty">尚未关联部署目标，点击“关联部署目标…”选择。</div>`;
+  } else {
+    container.innerHTML = currentEditTargetIds.map((pathId) => {
+      const found = findPathById(pathId);
+      if (!found) return "";
+      const label = getTargetLabel(found.server, found.path);
+      return `
+        <div class="edit-target-item" role="listitem">
+          <span class="target-chip-status ${isTargetDeployed(getProjectById(currentEditId), pathId) ? "deployed" : ""}" aria-hidden="true"></span>
+          <span class="edit-target-item-name">${escapeHtml(label)}</span>
+          <span class="edit-target-item-path" title="${escapeHtml(safeText(found.path.deployPath))}">${escapeHtml(safeText(found.path.deployPath))}</span>
+          <button
+            class="btn btn-xs btn-secondary"
+            type="button"
+            data-remove-target="${escapeHtml(pathId)}"
+            aria-label="解除关联 ${escapeHtml(label)}"
+          >解除</button>
+        </div>
+      `;
+    }).join("");
+  }
+
+  if (hint) {
+    hint.textContent = currentEditTargetIds.length
+      ? `已关联 ${currentEditTargetIds.length} 个部署目标，保存后生效。`
+      : "部署目标可多选，保存后即可一键部署到多个服务器/路径。";
+  }
 }
+
+byId("editTargetList").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-remove-target]");
+  if (!button) return;
+  currentEditTargetIds = currentEditTargetIds.filter((id) => id !== button.dataset.removeTarget);
+  renderEditTargetList();
+});
+
+byId("btnPickTargets").addEventListener("click", async () => {
+  const selected = await openTargetPicker({ mode: "link" });
+  if (!selected) return;
+  currentEditTargetIds = selected;
+  renderEditTargetList();
+  showToast(`已选择 ${selected.length} 个部署目标。`, "success", 1800);
+});
 
 function openEditModal(id) {
   currentEditId = id;
@@ -2021,23 +2929,8 @@ function openEditModal(id) {
   byId("editGroupName").value = normalizeGroupName(project.groupName);
   byId("editBuildCmd").value = safeText(project.buildCmd, "npm run build");
 
-  const deploy = project.deploy || {};
-  byId("editHost").value = safeText(deploy.host, "");
-  byId("editPort").value = safeText(deploy.port, "22");
-  byId("editUsername").value = safeText(deploy.username, "");
-  byId("editPassword").value = safeText(deploy.password, "");
-  byId("editPrivateKey").value = safeText(deploy.privateKey, "");
-  byId("editDeployPath").value = safeText(deploy.deployPath, "");
-  currentEditBackupPath = String(deploy.backupPath || "").trim();
-
-  switchEditAuthTab(deploy.privateKey ? "key" : "password");
-  setEditDeployHint("");
-  byId("editReuseConfigRow").hidden = true;
-  byId("editReuseProjectSelect").innerHTML = '<option value="">请选择项目配置…</option>';
-  byId("editReuseProjectSelect").value = "";
-  byId("editReuseProjectSelect").disabled = false;
-  byId("btnApplyReuseProjectConfig").disabled = false;
-  renderReuseProjectOptions();
+  currentEditTargetIds = getProjectTargets(project).map(({ path }) => path.id);
+  renderEditTargetList();
   byId("editRecentDir").value = "";
   syncEditModalOverlayMetrics();
   updateEditingCardHighlight();
@@ -2087,102 +2980,7 @@ byId("editAccessUrl").addEventListener("change", () => {
   byId("editAccessUrl").value = normalizeAccessUrl(byId("editAccessUrl").value);
 });
 
-byId("editGroupName").addEventListener("change", () => {
-  if (!byId("editReuseConfigRow").hidden) {
-    renderReuseProjectOptions({ forceOpen: true });
-  }
-});
-
-$$(".edit-auth-tabs .tab-btn").forEach((tab) => {
-  tab.addEventListener("click", () => switchEditAuthTab(tab.dataset.auth));
-});
-
-$(".btn-import-json-edit").addEventListener("click", () => {
-  byId("editInputJsonFile").click();
-});
-
-$(".btn-reuse-project-config").addEventListener("click", () => {
-  const row = byId("editReuseConfigRow");
-  if (!row) return;
-
-  const shouldOpen = row.hidden;
-  const candidates = renderReuseProjectOptions({ forceOpen: shouldOpen });
-  if (!candidates.length) {
-    row.hidden = false;
-    setEditDeployHint("暂无可复用的项目部署配置。", "#8b6117");
-    showToast("暂无可复用的项目部署配置。", "info", 2200);
-    return;
-  }
-
-  row.hidden = !shouldOpen;
-  if (shouldOpen) {
-    setEditDeployHint(`已为你按同组优先排好 ${candidates.length} 个可复用配置。`);
-  }
-});
-
-byId("btnApplyReuseProjectConfig").addEventListener("click", () => {
-  const selectedId = byId("editReuseProjectSelect").value;
-  if (!selectedId) {
-    showToast("请先选择要复用的项目配置。", "warn");
-    return;
-  }
-
-  const sourceProject = getProjectById(selectedId);
-  if (!sourceProject || !hasReusableDeployConfig(sourceProject)) {
-    showToast("所选项目没有可复用的部署配置。", "warn");
-    return;
-  }
-
-  applyDeployConfigFromProject(sourceProject);
-  byId("editReuseConfigRow").hidden = true;
-  showToast(`已复用 ${safeText(sourceProject.projectName)} 的部署配置。`, "success");
-});
-
-byId("editInputJsonFile").addEventListener("change", async () => {
-  const file = byId("editInputJsonFile").files[0];
-  if (!file) return;
-
-  const formData = new FormData();
-  formData.append("file", file);
-
-  try {
-    const data = await api("/api/import-json", { method: "POST", body: formData });
-    const connName = safeText(data.connectionName, file.name.replace(/\.json$/i, ""));
-
-    setEditDeployHint(`已导入：${connName}`);
-
-    if (data.host) byId("editHost").value = data.host;
-    if (data.port) byId("editPort").value = data.port;
-    if (data.username) byId("editUsername").value = data.username;
-    if (data.deployPath) byId("editDeployPath").value = data.deployPath;
-    currentEditBackupPath = String(data.backupPath || "").trim();
-
-    if (data.privateKey) {
-      byId("editPrivateKey").value = data.privateKey;
-      switchEditAuthTab("key");
-    }
-
-    if (data.password) {
-      if (data.encryptedPassword) {
-        byId("editPassword").value = "";
-        setEditDeployHint(`已导入：${connName}（密码为加密存储，请手动填写明文密码）`, "#e65d5d");
-        showToast("JSON 中密码为加密值，请手动输入服务器明文密码。", "warn", 3600);
-      } else {
-        byId("editPassword").value = data.password;
-      }
-      switchEditAuthTab("password");
-    }
-
-    showToast("JSON 配置导入成功。", "success");
-  } catch (error) {
-    showToast(`导入失败：${normalizeErrorMessage(error.message)}`, "error");
-  } finally {
-    byId("editInputJsonFile").value = "";
-  }
-});
-
 byId("btnSaveEdit").addEventListener("click", async () => {
-  const activeAuth = $(".edit-auth-tabs .tab-btn.active").dataset.auth;
   const projectName = byId("editProjectName").value.trim();
   const dirPath = normalizePath(byId("editDirPath").value);
   const currentProject = projects.find((item) => item.id === currentEditId) || null;
@@ -2203,31 +3001,9 @@ byId("btnSaveEdit").addEventListener("click", async () => {
     remark: byId("editRemark").value.trim(),
     accessUrl: normalizeAccessUrl(byId("editAccessUrl").value),
     groupName: toStoredGroupName(byId("editGroupName").value),
-    buildCmd: byId("editBuildCmd").value.trim() || "npm run build"
+    buildCmd: byId("editBuildCmd").value.trim() || "npm run build",
+    targetIds: [...currentEditTargetIds]
   };
-
-  const host = byId("editHost").value.trim();
-  const username = byId("editUsername").value.trim();
-  const deployPath = byId("editDeployPath").value.trim();
-
-  if (host || username || deployPath) {
-    update.deploy = {
-      host,
-      port: Number.parseInt(byId("editPort").value, 10) || 22,
-      username,
-      deployPath
-    };
-
-    if (currentEditBackupPath) {
-      update.deploy.backupPath = currentEditBackupPath;
-    }
-
-    if (activeAuth === "password") {
-      update.deploy.password = byId("editPassword").value;
-    } else {
-      update.deploy.privateKey = byId("editPrivateKey").value;
-    }
-  }
 
   try {
     const updated = await api(`/api/projects/${currentEditId}`, {
@@ -2246,9 +3022,28 @@ byId("btnSaveEdit").addEventListener("click", async () => {
   }
 });
 
+async function loadServers({ silent } = { silent: false }) {
+  try {
+    servers = await api("/api/servers");
+    updateServerCountBadge();
+    if (!silent) return true;
+    return true;
+  } catch (error) {
+    setOperationStatus("error", "状态：服务器数据加载失败");
+    if (!silent) {
+      showToast(`加载服务器失败：${normalizeErrorMessage(error.message)}`, "error", 3400);
+    }
+    return false;
+  }
+}
+
 async function loadProjects({ silent } = { silent: false }) {
   try {
-    projects = await api("/api/projects");
+    const [projectData] = await Promise.all([
+      api("/api/projects"),
+      loadServers({ silent: true })
+    ]);
+    projects = projectData;
     projects.sort((a, b) => {
       const aTime = new Date(a.createdAt || 0).getTime();
       const bTime = new Date(b.createdAt || 0).getTime();
@@ -2266,7 +3061,24 @@ async function loadProjects({ silent } = { silent: false }) {
   }
 }
 
+$$(".view-toggle .tab-btn").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const nextView = tab.dataset.view;
+    if (!nextView || nextView === activeView) return;
+    activeView = nextView;
+    $$(".view-toggle .tab-btn").forEach((item) => {
+      const isActive = item.dataset.view === nextView;
+      item.classList.toggle("active", isActive);
+      item.setAttribute("aria-selected", String(isActive));
+    });
+    renderList();
+    const viewLabel = nextView === "targets" ? "按目标" : "按项目";
+    showToast(`已切换到${viewLabel}视图。`, "info", 1600);
+  });
+});
+
 resetTerminal();
 renderTodayInfo();
 renderRecentDirOptions();
+updateServerCountBadge();
 loadProjects();

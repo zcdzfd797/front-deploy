@@ -109,8 +109,13 @@ async function runStreamingFetch(url, label, options = {}) {
     }
 
     if (data.type === "done") {
-      termSuccess("操作完成。");
-      setOperationStatus("success", `状态：${label}完成`);
+      if (Number(data.failedCount) > 0) {
+        termWarn(`操作结束：成功 ${Number(data.successCount) || 0} 个 / 失败 ${Number(data.failedCount)} 个`);
+        setOperationStatus("warn", `状态：${label}部分失败`);
+      } else {
+        termSuccess("操作完成。");
+        setOperationStatus("success", `状态：${label}完成`);
+      }
       streamResult = data;
       return;
     }

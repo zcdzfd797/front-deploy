@@ -69,11 +69,22 @@
               <span class="project-filter-result" id="projectFilterResult">0</span>
             </div>
           </section>
+
+          <section class="rail-panel compact server-panel" aria-label="服务器管理">
+            <button class="btn btn-secondary btn-sm btn-manage-servers" type="button" id="btnManageServers">
+              服务器管理
+              <span class="server-count-badge" id="serverCountBadge">0</span>
+            </button>
+          </section>
         </aside>
 
         <section class="mission-deck panel left-panel" aria-label="项目任务区">
           <div class="mission-header">
             <h2 class="mission-title">部署管理器</h2>
+            <div class="view-toggle tab-group" role="tablist" aria-label="视图切换">
+              <button class="tab-btn active" type="button" data-view="projects" role="tab" aria-selected="true">按项目</button>
+              <button class="tab-btn" type="button" data-view="targets" role="tab" aria-selected="false">按目标</button>
+            </div>
             <div class="mission-tools">
               <button class="btn btn-secondary btn-sm" type="button" id="btnRefreshProjects">刷新</button>
               <button class="btn btn-primary btn-sm" type="button" id="btnAddProject">添加项目</button>
@@ -91,9 +102,9 @@
               <span>当前命中</span>
             </div>
             <div>
-              <span class="summary-kicker">GROUP</span>
+              <span class="summary-kicker" id="summaryScopeKicker">GROUP</span>
               <strong id="summaryGroupName">全部</strong>
-              <span>当前分组</span>
+              <span id="summaryScopeLabel">当前分组</span>
             </div>
           </div>
           <div class="project-stage">
@@ -162,7 +173,7 @@
 
         <div class="form-group">
           <label for="inputRemark">项目备注</label>
-          <input type="text" id="inputRemark" name="remark" placeholder="可选备注，例如：生产环境…" autocomplete="off">
+          <textarea class="remark-textarea" id="inputRemark" name="remark" rows="2" placeholder="可选备注，例如：生产环境…（支持换行）" autocomplete="off"></textarea>
         </div>
         <div class="form-group">
           <label for="inputAccessUrl">项目访问地址</label>
@@ -226,7 +237,7 @@
 
         <div class="form-group">
           <label for="editRemark">项目备注</label>
-          <input type="text" id="editRemark" name="editRemark" placeholder="例如：ACC 环境" autocomplete="off">
+          <textarea class="remark-textarea" id="editRemark" name="editRemark" rows="2" placeholder="例如：ACC 环境（支持换行）" autocomplete="off"></textarea>
         </div>
         <div class="form-group">
           <label for="editAccessUrl">项目访问地址</label>
@@ -243,65 +254,135 @@
           <input type="text" id="editBuildCmd" name="buildCmd" placeholder="例如：npm run build" autocomplete="off">
         </div>
 
-        <div class="section-title">部署信息</div>
+        <div class="section-title">部署目标</div>
         <div class="form-group">
-          <label for="editInputJsonFile">导入 JSON 配置</label>
+          <label>已关联目标</label>
+          <div class="edit-target-list" id="editTargetList" role="list" aria-label="已关联部署目标"></div>
           <div class="input-row">
-            <input type="file" id="editInputJsonFile" name="sshConfig" accept=".json" hidden>
-            <button class="btn btn-secondary btn-import-json-edit" type="button">导入 JSON</button>
-            <button class="btn btn-secondary btn-reuse-project-config" type="button">复用项目配置</button>
-            <span class="hint edit-json-hint"></span>
+            <button class="btn btn-secondary btn-pick-targets" type="button" id="btnPickTargets">关联部署目标…</button>
+            <button class="btn btn-secondary btn-manage-servers" type="button" id="btnManageServersFromEdit">管理服务器</button>
           </div>
-          <div class="path-quick-row" id="editReuseConfigRow" hidden>
-            <select id="editReuseProjectSelect" name="reuseProjectConfig" aria-label="选择要复用的项目配置" autocomplete="off">
-              <option value="">请选择项目配置…</option>
-            </select>
-            <button class="btn btn-secondary btn-sm" type="button" id="btnApplyReuseProjectConfig">应用</button>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="editHost">服务器地址</label>
-          <input type="text" id="editHost" name="host" placeholder="例如：192.168.1.100" autocomplete="off" spellcheck="false">
-        </div>
-
-        <div class="form-group">
-          <label for="editPort">SSH 端口</label>
-          <input type="number" id="editPort" name="port" value="22" inputmode="numeric" autocomplete="off">
-        </div>
-
-        <div class="form-group">
-          <label for="editUsername">用户名</label>
-          <input type="text" id="editUsername" name="username" placeholder="例如：root" autocomplete="username" spellcheck="false">
-        </div>
-
-        <div class="form-group">
-          <label>认证方式</label>
-          <div class="tab-group edit-auth-tabs" role="tablist" aria-label="认证方式选择">
-            <button class="tab-btn active" type="button" data-auth="password" role="tab" aria-selected="true">密码</button>
-            <button class="tab-btn" type="button" data-auth="key" role="tab" aria-selected="false">私钥</button>
-          </div>
-        </div>
-
-        <div class="form-group edit-auth-password">
-          <label for="editPassword">密码</label>
-          <input type="password" id="editPassword" name="password" placeholder="请输入服务器密码…" autocomplete="current-password" spellcheck="false">
-        </div>
-
-        <div class="form-group edit-auth-key" hidden>
-          <label for="editPrivateKey">私钥内容</label>
-          <textarea id="editPrivateKey" name="privateKey" rows="5" placeholder="粘贴 SSH 私钥内容…" spellcheck="false" autocomplete="off"></textarea>
-        </div>
-
-        <div class="form-group">
-          <label for="editDeployPath">部署路径</label>
-          <input type="text" id="editDeployPath" name="deployPath" placeholder="例如：/var/www/html/my-app" autocomplete="off" spellcheck="false">
+          <span class="hint edit-target-hint" id="editTargetHint"></span>
         </div>
       </div>
 
       <div class="modal-footer">
         <button class="btn btn-secondary" type="button" data-close="editModal">取消</button>
         <button class="btn btn-primary" type="button" id="btnSaveEdit">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="serverModal" aria-hidden="true" role="presentation">
+    <div class="modal modal-wide modal-server-manager" role="dialog" aria-modal="true" aria-labelledby="serverModalTitle">
+      <div class="modal-header">
+        <h2 id="serverModalTitle">服务器管理</h2>
+        <button class="btn-close" type="button" data-close="serverModal" aria-label="关闭服务器管理弹窗">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="server-manager-list" id="serverManagerList">
+          <div class="server-manager-toolbar">
+            <button class="btn btn-primary btn-sm" type="button" id="btnAddServer">新建服务器</button>
+            <span class="server-manager-hint">一台服务器可维护多个部署路径，项目通过“部署目标”与路径多对多关联。</span>
+          </div>
+          <div class="server-list" id="serverList"></div>
+        </div>
+
+        <div class="server-manager-form" id="serverFormPanel" hidden>
+          <div class="section-title" id="serverFormTitle">新建服务器</div>
+          <div class="form-group">
+            <label for="serverFormName">服务器名称</label>
+            <input type="text" id="serverFormName" name="serverName" placeholder="例如：生产服务器" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="serverFormHost">服务器地址</label>
+            <input type="text" id="serverFormHost" name="serverHost" placeholder="例如：192.168.1.100" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-inline-row">
+            <div class="form-group">
+              <label for="serverFormPort">SSH 端口</label>
+              <input type="number" id="serverFormPort" name="serverPort" value="22" inputmode="numeric" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="serverFormUsername">用户名</label>
+              <input type="text" id="serverFormUsername" name="serverUsername" placeholder="例如：root" autocomplete="username" spellcheck="false">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>认证方式</label>
+            <div class="tab-group server-auth-tabs" role="tablist" aria-label="认证方式选择">
+              <button class="tab-btn active" type="button" data-auth="password" role="tab" aria-selected="true">密码</button>
+              <button class="tab-btn" type="button" data-auth="key" role="tab" aria-selected="false">私钥</button>
+            </div>
+          </div>
+          <div class="form-group server-auth-password">
+            <label for="serverFormPassword">密码</label>
+            <input type="password" id="serverFormPassword" name="serverPassword" placeholder="请输入服务器密码…" autocomplete="current-password" spellcheck="false">
+          </div>
+          <div class="form-group server-auth-key" hidden>
+            <label for="serverFormPrivateKey">私钥内容</label>
+            <textarea id="serverFormPrivateKey" name="serverPrivateKey" rows="5" placeholder="粘贴 SSH 私钥内容…" spellcheck="false" autocomplete="off"></textarea>
+          </div>
+          <div class="form-group">
+            <label>导入配置</label>
+            <div class="input-row">
+              <input type="file" id="serverFormJsonFile" accept=".json" hidden>
+              <button class="btn btn-secondary btn-sm" type="button" id="btnImportServerJson">导入 FinalShell JSON</button>
+              <span class="hint" id="serverFormJsonHint"></span>
+            </div>
+          </div>
+          <div class="server-form-actions">
+            <button class="btn btn-secondary" type="button" id="btnCancelServerForm">取消</button>
+            <button class="btn btn-primary" type="button" id="btnSaveServerForm">保存服务器</button>
+          </div>
+        </div>
+
+        <div class="server-manager-form" id="pathFormPanel" hidden>
+          <div class="section-title" id="pathFormTitle">新增部署路径</div>
+          <div class="form-group">
+            <span class="hint" id="pathFormServerLabel"></span>
+          </div>
+          <div class="form-group">
+            <label for="pathFormLabel">路径名称</label>
+            <input type="text" id="pathFormLabel" name="pathLabel" placeholder="可选，例如：官网前台" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="pathFormDeployPath">部署路径</label>
+            <input type="text" id="pathFormDeployPath" name="pathDeployPath" placeholder="例如：/var/www/html/my-app" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label for="pathFormBackupPath">备份路径</label>
+            <input type="text" id="pathFormBackupPath" name="pathBackupPath" placeholder="可选，缺省时备份保留在部署路径下" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="server-form-actions">
+            <button class="btn btn-secondary" type="button" id="btnCancelPathForm">取消</button>
+            <button class="btn btn-primary" type="button" id="btnSavePathForm">保存路径</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="targetPickerModal" aria-hidden="true" role="presentation">
+    <div class="modal modal-target-picker" role="dialog" aria-modal="true" aria-labelledby="targetPickerTitle">
+      <div class="modal-header">
+        <h2 id="targetPickerTitle">选择部署目标</h2>
+        <button class="btn-close" type="button" data-close="targetPickerModal" aria-label="关闭目标选择弹窗">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="target-picker-toolbar">
+          <span class="target-picker-count" id="targetPickerCount" role="status" aria-live="polite"></span>
+          <div class="target-picker-actions" id="targetPickerActions">
+            <button class="btn btn-xs btn-secondary" type="button" data-picker-action="select-all">全选</button>
+            <button class="btn btn-xs btn-secondary" type="button" data-picker-action="invert-selection">反选</button>
+          </div>
+        </div>
+        <div class="target-picker-list" id="targetPickerList" role="group" aria-label="部署目标列表"></div>
+        <p class="target-picker-empty" id="targetPickerEmpty" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" type="button" id="btnTargetPickerCancel">取消</button>
+        <button class="btn btn-primary" type="button" id="btnTargetPickerConfirm">确认</button>
       </div>
     </div>
   </div>
